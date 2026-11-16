@@ -1,0 +1,53 @@
+# 依赖与构建产物（体积大、可重新生成）
+node_modules/
+dist*/
+# build/ 是安装器资源目录（icon.ico / installer.nsh / bmp / LICENSE.txt），需要入库
+*.exe
+*.asar
+*.7z
+*.msi
+
+# 本地运行数据与个人配置（含账号 Cookie / 观看记录 / 标定值，禁止入库）
+.workbuddy/
+data/
+settings.json
+Partitions/
+.env
+.env.*
+*.log
+
+# 素材应保存在父目录；以下规则防止误放后被提交，必要 build/ 品牌资源不受影响
+/_materials/
+/_preview/
+/promo/
+/项目资料/
+scripts/vision-probe/fixtures/
+scripts/vision-probe/reports/
+scripts/vision-probe/video-conf.json
+scripts/vision-probe/frames500-summary.json
+scripts/vision-probe/gradient-pair-ab.json
+scripts/vision-probe/roi-scale-ab.json
+scripts/vision-probe/vidscan-gate.json
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.mp4
+*.webm
+*.mov
+*.wav
+*.mp3
+*.raw
+*.bin
+*.zip
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python 字节码缓存（scripts/make-assets.py）
+__pycache__/
+*.pyc

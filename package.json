@@ -1,0 +1,112 @@
+{
+  "name": "genshin-route-buddy",
+  "productName": "原神跟跑助手",
+  "version": "0.2.5",
+  "description": "B站攻略视频悬浮窗：置顶于原神之上，自动读取视频里的角色朝向并在自己的小地图上标出",
+  "main": "src/main.js",
+  "author": "FinalLawer",
+  "license": "GPL-3.0-only",
+  "homepage": "https://github.com/FinalLawer/GIFA",
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir",
+    "pack:zip": "node scripts/pack-release.js --zip-only",
+    "pack:setup": "node scripts/pack-release.js --setup-only",
+    "pack:release": "node scripts/pack-release.js",
+    "verify:artifacts": "node scripts/verify-artifacts.js",
+    "assets": "python scripts/make-assets.py",
+    "test:license": "node scripts/license-test.js",
+    "test:materials": "node scripts/material-paths-test.js",
+    "test:data-dir": "node scripts/data-dir-test.js",
+    "test:playback": "node scripts/playback-settings-test.js && node scripts/playback-media-test.js",
+    "test:login": "node scripts/login-test.js",
+    "test:controls": "node scripts/hold-hotkeys-test.js && node scripts/hotkey-config-test.js && node scripts/immersion-speed-test.js",
+    "test:autocenter": "node scripts/vision-probe/autocenter-500.js",
+    "test:cone": "node scripts/vision-probe/cone-edge-regress.js"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.finallawer.genshin-route-buddy",
+    "productName": "原神跟跑助手",
+    "asar": true,
+    "afterPack": "scripts/after-pack.js",
+    "electronLanguages": ["zh-CN", "en-US"],
+    "npmRebuild": false,
+    "asarUnpack": [
+      "**/node_modules/uiohook-napi/**"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      {
+        "from": "build",
+        "to": "build",
+        "filter": ["icon.ico"]
+      },
+      "package.json",
+      "!**/node_modules/uiohook-napi/prebuilds/!(win32-${arch}){,/**/*}",
+      "!**/node_modules/uiohook-napi/{src,libuiohook}{,/**/*}",
+      "!**/node_modules/uiohook-napi/dist/*.map",
+      "!**/node_modules/uiohook-napi/dist/prebuild-test-noop.js",
+      "!**/node_modules/node-gyp-build/{bin.js,optional.js,build-test.js}"
+    ],
+    "extraResources": [
+      { "from": "LICENSE", "to": "licenses/LICENSE-GIFA.txt" },
+      { "from": "NOTICE", "to": "licenses/NOTICE-GIFA.txt" },
+      { "from": "LICENSES/MIT-legacy.txt", "to": "licenses/LICENSE-MIT-LEGACY-GIFA.txt" },
+      { "from": "LICENSES/LGPL-3.0.txt", "to": "licenses/LGPL-3.0.txt" },
+      { "from": "LICENSES/libuiohook-NOTICE.txt", "to": "licenses/libuiohook-NOTICE.txt" }
+    ],
+    "win": {
+      "executableName": "GIFA",
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "requestedExecutionLevel": "requireAdministrator",
+      "artifactName": "GIFA-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "原神跟跑助手",
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": ["zh_CN"],
+      "include": "build/installer.nsh",
+      "license": "build/LICENSE.txt",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "GIFA-${version}-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "GIFA-${version}-portable.${ext}",
+      "requestExecutionLevel": "admin"
+    }
+  },
+  "dependencies": {
+    "uiohook-napi": "^1.5.5"
+  }
+}
