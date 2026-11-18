@@ -153,7 +153,7 @@ npm.cmd run verify:artifacts
 
 三份 `scripts/vision-probe/vid-times-*.json` 是抽帧参数配置，保留在项目中；本机视频位置等私有配置放在外部素材目录的 `vision-probe/video-conf.json`。现有 166/500 帧回归二进制数据仍读取系统临时目录，不会复制到仓库。`vid-times-roi.json` 默认导出 PNG，不能直接当作 166 帧二进制数据的重建命令。
 
-可运行 `npm.cmd run test:materials` 检查路径边界，`npm.cmd run test:license` 检查许可一致性，`npm.cmd run test:cone` 检查视锥。实拍数据缺失时须留意 `SKIP`；`test:autocenter` 需要本机 500 帧数据，完整测试依赖见问题清单。
+可运行 `npm.cmd run test:materials` 检查路径边界，`npm.cmd run test:license` 检查许可一致性，`npm.cmd run test:cone` 检查视锥，`npm.cmd run test:snow` 检查雪地近白背景和用户视频抽样。`npm.cmd run test:bearing-view` 检查视角挂起及箭头漏检时视角独立上报。实拍数据缺失时须留意 `SKIP`；`test:autocenter` 需要本机 500 帧数据，完整测试依赖见问题清单。
 
 `npm.cmd run test:controls` 验证按下/松开、物理重复去重、重挂后的释放屏障、快捷键冲突事务、沉浸窗口与鼠标避让、常规与临时倍率隔离；不启动业务应用、不读写用户配置。游戏内鼠标和权限行为仍需实机验收。
 
