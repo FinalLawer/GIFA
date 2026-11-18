@@ -5,13 +5,14 @@
  * 职责：无边框置顶窗口、全局快捷键、B 站视频解析、设置持久化
  */
 
-const { app, BrowserWindow, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFileSync, spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const hookHotkeys = require('./hook-hotkeys');
 const { mergeHotkeys, prepareHotkeyUpdate } = require('./hotkey-config');
+const sandboxFallback = require('./sandbox-fallback');
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -319,6 +320,11 @@ app.setPath('userData', USER_DATA_DIR);
 // 缓存类目录一并挪过去，否则 C 盘会多出一份 Chromium 缓存
 app.setPath('sessionData', USER_DATA_DIR);
 /* [DATA-DIR-END] ---------------------------------------------------------- */
+
+// 管理员权限下，部分 Windows 起不了 Chromium 沙箱子进程：GPU 进程连续 launch-failed，
+// 约一秒后主进程被 Chromium 主动结束，用户只看到「双击没反应」。这里在第一个子进程
+// 创建之前接管：记录启动诊断日志，失败时自动改用兼容模式重启。详见 sandbox-fallback.js。
+const sandboxGuard = sandboxFallback.install({ app, dialog, dataDir: USER_DATA_DIR });
 
 
 // 支持 `npm start -- --open BV1xx411c7mD`：从命令行/快捷方式直接带视频启动
@@ -955,6 +961,7 @@ function createConsole() {
 
   consoleWin.once('ready-to-show', () => {
     consoleWin.show();
+    sandboxGuard.startupComplete();
     notifyFloatState();
   });
 

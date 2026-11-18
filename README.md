@@ -122,6 +122,7 @@ npm.cmd run test:materials
 npm.cmd run test:data-dir
 npm.cmd run test:controls
 npm.cmd run test:login
+npm.cmd run test:sandbox
 npm.cmd run test:playback
 npm.cmd run pack:release
 npm.cmd run verify:artifacts
@@ -157,6 +158,8 @@ npm.cmd run verify:artifacts
 
 `npm.cmd run test:login` 离线验证登录入口不依赖浮窗、登录窗口前台显示、重复点击恢复、登录成功广播和轮询异步竞态；不连接 B 站、不读取用户配置。
 
+`npm.cmd run test:sandbox` 验证沙箱启动失败兜底：先做离线回归，再用隔离的 Electron 和一个不存在的 `--gpu-launcher` 模拟 GPU 进程创建失败，检查记标记、带开关重启、兼容模式生效和失败对话框。测试数据放在系统临时目录并自动清理；模拟不能代替受影响系统上的实机验收。
+
 `npm.cmd run test:playback` 验证音量、静音、倍速的保存和恢复：先做离线设置文件与 IPC 回归，再用隔离的 Electron 和本地媒体页面验证首次自动播放、换源、替换视频元素、页面重载和延迟创建视频。测试数据放在系统临时目录并自动清理，不启动业务窗口、不读取用户配置，也不连接 B 站；真实 B 站播放器的手动切 P、自动连播仍需实播验收。
 
 ## 已知限制
@@ -165,3 +168,4 @@ npm.cmd run verify:artifacts
 - 部分游戏使用 Raw Input 独占键盘，若快捷键失效，在设置里换成别的组合键
 - 必须登录才有 1080P / 4K，未登录时 B 站自己只放预览或标清
 - 网页版首屏比嵌入播放器慢一两秒
+- 少数 Windows 环境在管理员权限下创建不了 Chromium 沙箱子进程（[上游问题](https://github.com/electron/electron/issues/49167)）。v0.2.5 之后的版本遇到时会自动以关闭沙箱的兼容模式重启一次并记住；仍然打不开时会弹出说明。启动诊断日志在 `startup.log`（安装版 `%APPDATA%\原神跟跑助手\`，绿色版 `data\`），反馈问题时请附上
