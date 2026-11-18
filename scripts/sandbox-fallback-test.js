@@ -50,10 +50,10 @@ function fakeDialog() {
   return dialog;
 }
 
-function setup({ dataDir = freshDir(), argv = ['GIFA.exe'], platform = 'win32', ...appOptions } = {}) {
+function setup({ dataDir = freshDir(), argv = ['GIFA.exe'], platform = 'win32', beforeExit, ...appOptions } = {}) {
   const app = fakeApp(appOptions);
   const dialog = fakeDialog();
-  const guard = install({ app, dialog, dataDir, platform, argv });
+  const guard = install({ app, dialog, dataDir, platform, argv, beforeExit });
   return { app, dialog, guard, dataDir, marker: path.join(dataDir, MARKER_FILE) };
 }
 
@@ -258,9 +258,22 @@ try {
     assert.equal(guard.logFile, logFile);
   });
 
+  check('兼容重启和失败退出都先清理外部进程，每次只清理一次', () => {
+    for (const argv of [['GIFA.exe'], ['GIFA.exe', NO_SANDBOX_ARG]]) {
+      const events = [];
+      const { app, dialog } = setup({ argv, beforeExit: () => events.push('stop') });
+      app.relaunch = () => events.push('relaunch');
+      app.exit = () => events.push('exit');
+      dialog.showMessageBoxSync = () => events.push('dialog');
+      gone(app, LAUNCH_FAILED);
+      gone(app, LAUNCH_FAILED);
+      assert.deepEqual(events, ['stop', argv.length === 1 ? 'relaunch' : 'dialog', 'exit']);
+    }
+  });
+
   check('主进程在创建任何窗口和子进程之前接入', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
-    const installAt = mainSource.indexOf('sandboxFallback.install({ app, dialog, dataDir: USER_DATA_DIR })');
+    const installAt = mainSource.indexOf('sandboxFallback.install({ app, dialog, dataDir: USER_DATA_DIR, beforeExit: stopGamepadPoller })');
     assert.ok(installAt > 0, 'main.js 调用 install');
     assert.ok(installAt > mainSource.indexOf("app.setPath('userData', USER_DATA_DIR)"), '在 userData 确定之后');
     assert.ok(installAt < mainSource.indexOf('app.requestSingleInstanceLock()'), '在单实例与 whenReady 之前');

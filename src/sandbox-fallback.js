@@ -123,7 +123,7 @@ function failureDialog({ details, logFile, exe }) {
  *
  * @returns {{mode: 'off'|'normal'|'fallback'|'manual', logFile: string, log: Function, startupComplete: Function}}
  */
-function install({ app, dialog, dataDir, platform = process.platform, argv = process.argv }) {
+function install({ app, dialog, dataDir, platform = process.platform, argv = process.argv, beforeExit }) {
   const logFile = path.join(dataDir, LOG_FILE);
   const log = createLogger(logFile);
   if (platform !== 'win32') {
@@ -161,6 +161,11 @@ function install({ app, dialog, dataDir, platform = process.platform, argv = pro
   function engage(kind, details) {
     if (handled) return;
     handled = true;
+    try {
+      beforeExit?.();
+    } catch (err) {
+      log('cleanup', String(err?.message || err));
+    }
 
     if (mode === 'normal') {
       try {

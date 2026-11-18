@@ -121,6 +121,7 @@ npm.cmd run test:license
 npm.cmd run test:materials
 npm.cmd run test:data-dir
 npm.cmd run test:controls
+npm.cmd run test:gamepad
 npm.cmd run test:login
 npm.cmd run test:sandbox
 npm.cmd run test:playback
@@ -155,6 +156,8 @@ npm.cmd run verify:artifacts
 可运行 `npm.cmd run test:materials` 检查路径边界，`npm.cmd run test:license` 检查许可一致性，`npm.cmd run test:cone` 检查视锥。实拍数据缺失时须留意 `SKIP`；`test:autocenter` 需要本机 500 帧数据，完整测试依赖见问题清单。
 
 `npm.cmd run test:controls` 验证按下/松开、物理重复去重、重挂后的释放屏障、快捷键冲突事务、沉浸窗口与鼠标避让、常规与临时倍率隔离；不启动业务应用、不读写用户配置。游戏内鼠标和权限行为仍需实机验收。
+
+`npm.cmd run test:gamepad` 离线验证八方向触发、快速松开 L3、轮询异常退出、手柄断连和键鼠与手柄同时长按；游戏前台仍需实体手柄验收。
 
 `npm.cmd run test:login` 离线验证登录入口不依赖浮窗、登录窗口前台显示、重复点击恢复、登录成功广播和轮询异步竞态；不连接 B 站、不读取用户配置。
 
