@@ -186,6 +186,9 @@ function applyIncomingPlaybackPreferences(raw) {
 
 /* ------------------------------------------------------------- 元素发现 */
 
+// undefined：尚未确认或有多个候选；null：确认没有 video。
+let soleDocumentVideo;
+
 function visibleArea(v) {
   const r = v.getBoundingClientRect();
   if (r.width < 80 || r.height < 60) return 0;
@@ -195,8 +198,10 @@ function visibleArea(v) {
 }
 
 function pickVideo() {
-  const list = Array.from(document.querySelectorAll('video'));
-  if (!list.length) return null;
+  const list = document.querySelectorAll('video');
+  soleDocumentVideo = list.length < 2 ? list[0] || null : undefined;
+  if (soleDocumentVideo !== undefined) return soleDocumentVideo;
+
   let best = null;
   let bestArea = 0;
   for (const v of list) {
@@ -207,6 +212,20 @@ function pickVideo() {
     }
   }
   return best || list[0];
+}
+
+function hasConfirmedVideo() {
+  return soleDocumentVideo !== undefined && soleDocumentVideo === video && (!video || document.contains(video));
+}
+
+function addedVideo(records) {
+  for (const { addedNodes } of records) {
+    for (const node of addedNodes) {
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.matches('video') || (node.firstElementChild && node.querySelector('video'))) return true;
+    }
+  }
+  return false;
 }
 
 const EVENTS = [
@@ -298,7 +317,9 @@ for (const type of ['loadstart', 'emptied', 'loadedmetadata', 'play', 'playing']
   document.addEventListener(type, capturePlaybackStart, true);
 }
 
-new MutationObserver(() => {
+new MutationObserver((records) => {
+  // 单个候选始终会被选中。还在文档里且没有新增候选时，无需读布局。
+  if (hasConfirmedVideo() && !addedVideo(records)) return;
   const v = pickVideo();
   if (v !== video) bind(v);
 }).observe(document, { childList: true, subtree: true });
@@ -520,11 +541,10 @@ function grabCenter(roi, scale = 0.62, cap = 320, offX = 0, offY = 0) {
  * 为什么要这么做：`drawImage(video)` 的耗时几乎**与区域大小无关** ——
  * 本机实测抓 64px 和抓 512px 都是约 10ms，而每个区域原本每帧要抓两次
  * （箭头 0.62R + 扇形 1.5R）。扇形大窗本来就完整包住箭头小窗，
- * 所以小窗只要按**取整后的实际起点差**做一次内存复制：
- * 像素与单独抓逐字节相同，识别结果不变，每帧少一次约 10ms 的读帧。
+ * 小窗用原缓冲区、行跨度和起点偏移表示，按原始 RGBA 字节读取像素。
  *
- * 注意起点差不能拿 (bigSize - smallSize) / 2 推：两个窗口各自 round 过，
- * 差 1px 整块像素就错位了，所以直接用两次算出来的 sx/sy 相减。
+ * 起点差来自两个窗口各自取整后的 sx/sy。同一帧的裁片只供同步分析，
+ * 读帧和截图导出仍由 Canvas 提供紧密排列的 ImageData。
  */
 function cropCenterWindow(big, roi, scale = 0.62, cap = 320, offX = 0, offY = 0) {
   const w = centerWindow(roi, scale, cap, offX, offY);
@@ -534,14 +554,9 @@ function cropCenterWindow(big, roi, scale = 0.62, cap = 320, offX = 0, offY = 0)
   const oy = w.sy - big.sy;
   if (ox < 0 || oy < 0 || ox + w.size > big.size || oy + w.size > big.size) return null;
 
-  const src = big.img.data;
-  const dst = new Uint8ClampedArray(w.size * w.size * 4);
-  const rowBytes = w.size * 4;
-  for (let y = 0; y < w.size; y += 1) {
-    const off = ((oy + y) * big.size + ox) * 4;
-    dst.set(src.subarray(off, off + rowBytes), y * rowBytes);
-  }
-  return { img: { data: dst, width: w.size, height: w.size }, size: w.size, step: w.step };
+  const stride = big.img.stride ?? big.size * 4;
+  const offset = (big.img.offset ?? 0) + oy * stride + ox * 4;
+  return { img: { data: big.img.data, width: w.size, height: w.size, stride, offset }, size: w.size, step: w.step };
 }
 
 /**
@@ -563,25 +578,41 @@ function cyanScore(r, g, b) {
   return Math.min(g, b) - r;
 }
 
+function cyanP99(img, size, step, histogram) {
+  histogram.fill(0);
+  if (size <= 0) return -Infinity;
+  const { data, stride = size * 4, offset = 0 } = img;
+  const probeStep = Math.max(step, 4);
+  for (let y = 0; y < size; y += probeStep) {
+    const row = offset + y * stride;
+    for (let x = 0; x < size; x += probeStep) {
+      const i = row + x * 4;
+      histogram[cyanScore(data[i], data[i + 1], data[i + 2]) + 255] += 1;
+    }
+  }
+
+  // 青色分数是 [-255, 255] 的整数，桶计数能精确取到排序后 floor(n * 0.99) 的值。
+  const probesPerSide = Math.ceil(size / probeStep);
+  const count = probesPerSide * probesPerSide;
+  let rankFromEnd = count - 1 - Math.floor(count * 0.99);
+  let bin = 510;
+  while (bin > 0 && rankFromEnd >= histogram[bin]) {
+    rankFromEnd -= histogram[bin];
+    bin -= 1;
+  }
+  return bin - 255;
+}
+
 function analyze(img, size, step) {
-  const d = img.data;
+  const { data: d, stride = size * 4, offset = 0 } = img;
   const c0 = (size - 1) / 2;
 
   // 阈值按本帧自适应，但**下限必须很高**。
   // 实测：原神草地/树影的阴影处 min(g,b)-r 能有 20~90，而角色箭头约 166。
   // 之前把阈值放到 36，结果满屏草地都被当成青色，质心随机乱指 —— 这也解释了
   // 为什么「换个场景就偏到别处」。所以门限抬到 110 上下，只留接近纯青的像素。
-  const probeStep = Math.max(step, 4);
-  const probe = [];
-  for (let y = 0; y < size; y += probeStep) {
-    for (let x = 0; x < size; x += probeStep) {
-      const i = (y * size + x) * 4;
-      probe.push(cyanScore(d[i], d[i + 1], d[i + 2]));
-    }
-  }
-  if (!probe.length) return { valid: false, angle: 0, conf: 0, cyans: 0, tipFrac: 0, spread: 180 };
-  probe.sort((a, b) => a - b);
-  const p99 = probe[Math.min(probe.length - 1, Math.floor(probe.length * 0.99))];
+  const histogram = BEARING.cyanHistogram || (BEARING.cyanHistogram = new Uint32Array(511));
+  const p99 = cyanP99(img, size, step, histogram);
   // 整块画面里都没有接近纯青的像素 → 这一帧根本没有箭头（转场 / 特写 / 对话）
   if (p99 < 100) return { valid: false, angle: 0, conf: 0, cyans: 0, tipFrac: 0, spread: 180 };
   const thr = Math.max(112, p99 * 0.74);
@@ -605,8 +636,9 @@ function analyze(img, size, step) {
   let cyans = 0;
   for (let y = 0; y < size; y += step) {
     const dy = c0 - y; // 屏幕 y 向下，翻成数学坐标（y 向上）
+    const row = offset + y * stride;
     for (let x = 0; x < size; x += step) {
-      const i = (y * size + x) * 4;
+      const i = row + x * 4;
       if (cyanScore(d[i], d[i + 1], d[i + 2]) < thr) continue;
       const dx = x - c0;
       const rho = Math.sqrt(dx * dx + dy * dy);
@@ -1006,7 +1038,9 @@ function angDiff(a, b) {
  */
 
 function analyzeCone(img, size, step) {
-  const d = img.data;
+  const { data: d, stride = size * 4, offset = 0 } = img;
+  const sampleStride = step * stride;
+  const sampleBytes = step * 4;
   const c0 = (size - 1) / 2;
   const NA = 120; // 3° 一格
   const NR = 12;  // 径向 12 层
@@ -1082,10 +1116,10 @@ function analyzeCone(img, size, step) {
   let whiteCount = 0;
   let paleCount = 0;
   for (let gy = 0; gy < nx; gy += 1) {
-    const row = gy * step * size;
+    const row = offset + gy * sampleStride;
     const o = gy * nx;
     for (let gx = 0; gx < nx; gx += 1) {
-      const i = (row + gx * step) * 4;
+      const i = row + gx * sampleBytes;
       const r = d[i];
       const g = d[i + 1];
       const b = d[i + 2];
@@ -1102,9 +1136,10 @@ function analyzeCone(img, size, step) {
   if (paleBackground) {
     whiteCount = 0;
     for (let gy = 0; gy < nx; gy += 1) {
+      const row = offset + gy * sampleStride;
       for (let gx = 0; gx < nx; gx += 1) {
-        const offset = (gy * step * size + gx * step) * 4;
-        const white = d[offset] >= 252 && d[offset + 1] >= 252 && d[offset + 2] >= 252;
+        const i = row + gx * sampleBytes;
+        const white = d[i] >= 252 && d[i + 1] >= 252 && d[i + 2] >= 252;
         tmp[gy * nx + gx] = white ? 1 : 0;
         if (white) whiteCount += 1;
       }
@@ -1174,14 +1209,14 @@ function analyzeCone(img, size, step) {
 
   /* ---- 第二遍：把没被图标盖住的像素按极坐标格累加 RGB ---- */
   for (let gy = 0; gy < nx; gy += 1) {
-    const row = gy * step * size;
+    const row = offset + gy * sampleStride;
     const o = gy * nx;
     for (let gx = 0; gx < nx; gx += 1) {
       const c = cellOf[o + gx];
       if (c < 0) continue;
       all[c] += 1;
       if (tmp[o + gx] === 2) continue;
-      const i = (row + gx * step) * 4;
+      const i = row + gx * sampleBytes;
       sR[c] += d[i];
       sG[c] += d[i + 1];
       sB[c] += d[i + 2];
@@ -1567,14 +1602,11 @@ function sendBearing(payload) {
 }
 
 function centeredPatch(img, size, width, dx = 0, dy = 0) {
-  const data = new Uint8ClampedArray(width * width * 4);
   const x = Math.round((size - width) / 2) + dx;
   const y = Math.round((size - width) / 2) + dy;
-  for (let row = 0; row < width; row += 1) {
-    const start = ((y + row) * size + x) * 4;
-    data.set(img.data.subarray(start, start + width * 4), row * width * 4);
-  }
-  return { data, width, height: width };
+  const stride = img.stride ?? size * 4;
+  const offset = (img.offset ?? 0) + y * stride + x * 4;
+  return { data: img.data, width, height: width, stride, offset };
 }
 
 function analyzeArrowWithRecovery(img, size, step) {
@@ -2755,8 +2787,9 @@ function boot() {
     push(true);
   }, 500);
 
-  // B 站是 SPA，切 P / 换片会重建 <video>，持续轮询兜底
+  // DOM 变更在定时器前由观察器处理。多个 video 仍要兜底检查纯样式变化。
   setInterval(() => {
+    if (hasConfirmedVideo()) return;
     const v = pickVideo();
     if (v && v !== video) bind(v);
     else if (!v && video && !video.isConnected) bind(null);

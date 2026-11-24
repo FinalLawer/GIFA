@@ -422,6 +422,7 @@ const DEFAULT_SETTINGS = {
   // 「上次看到」：光有 lastText/lastPart 不够 —— 用户记不住的是「哪个视频、第几 P」，
   // 长链接/BV 号看不出片名，所以额外存标题、视频 id、分 P 总数和最后观看时间。
   lastTitle: '',
+  lastCover: '',
   lastVideoId: '',
   lastPageCount: 0,
   lastWatchedAt: 0,
@@ -457,6 +458,7 @@ function noteWatched(s, info) {
   if (Number.isFinite(p) && p > 0) s.lastPart = Math.floor(p);
   if (info.id) s.lastVideoId = String(info.id);
   if (info.title !== undefined) s.lastTitle = String(info.title || '');
+  if (info.cover !== undefined) s.lastCover = typeof info.cover === 'string' ? info.cover : '';
   if (info.pageCount !== undefined) {
     const n = Number(info.pageCount);
     s.lastPageCount = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -982,15 +984,9 @@ function createConsole() {
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     backgroundColor: '#1e1e1e',
     autoHideMenuBar: true,
-    // Windows 原生标题栏在浅色系统主题下是一条白条，会和我们自绘的 40px 深色
-    // TitleBar 叠成两层。用 Window Controls Overlay 把网页内容延伸到窗口顶部，
-    // 最小化/最大化/关闭三个系统按钮浮在深色顶栏右上角（VS Code / Wpf.Ui 同款）。
-    // 对应 console.css 里 .topbar 的右侧留白与拖动区域；仅 Windows 有效。
+    // Window Controls Overlay 的颜色、高度与 console.css 的 --chrome / --title-h 一致。
     ...(process.platform === 'win32'
-      ? {
-          titleBarStyle: 'hidden',
-          titleBarOverlay: { color: '#1e1e1e', symbolColor: '#e6e6e6', height: 40 }
-        }
+      ? { titleBarStyle: 'hidden', titleBarOverlay: { color: '#1e1e1e', symbolColor: '#e6e6e6', height: 40 } }
       : {}),
     show: false,
     webPreferences: {
@@ -1046,6 +1042,7 @@ setInterval(() => {
 /* ------------------------------------------------------- 方位标记叠加层 */
 
 let overlayWin = null;
+let overlayReleaseTimer = null;
 let overlayPlacing = false;
 let lastBearing = null;
 
@@ -1111,19 +1108,24 @@ function createOverlay() {
 
   const overlay = overlayWin;
   overlay.on('closed', () => {
-    if (overlayWin === overlay) overlayWin = null;
+    if (overlayWin !== overlay) return;
+    clearTimeout(overlayReleaseTimer);
+    overlayReleaseTimer = null;
+    overlayWin = null;
   });
   overlay.webContents.on('did-finish-load', () => {
     if (overlayWin !== overlay || overlay.isDestroyed()) return;
     overlay.webContents.send('mode', overlayPlacing ? 'place' : 'lock');
     if (lastBearing) overlay.webContents.send('bearing', lastBearing);
-    if (settings.bearing.enabled && !overlay.isVisible()) overlay.showInactive();
+    if (settings.bearing.enabled && (win || overlayPlacing) && !overlay.isVisible()) overlay.showInactive();
   });
   overlay.loadFile(path.join(__dirname, 'overlay', 'index.html'));
   return overlay;
 }
 
 function showOverlay() {
+  clearTimeout(overlayReleaseTimer);
+  overlayReleaseTimer = null;
   const overlay = createOverlay();
   if (!overlay.isVisible() && !overlay.webContents.isLoading()) overlay.showInactive();
   return overlay;
@@ -1153,15 +1155,22 @@ function setBearingEnabled(on) {
   settings.bearing.enabled = !!on;
 
   if (on) {
-    showOverlay();
+    if (win && !win.isDestroyed()) showOverlay();
   } else {
     overlayPlacing = false;
-    if (overlayWin && !overlayWin.isDestroyed()) {
-      overlayWin.setIgnoreMouseEvents(true, { forward: true });
-      overlayWin.setFocusable(false);
-      overlayWin.hide();
-    }
     clearBearingOverlay();
+    const overlay = overlayWin;
+    if (overlay && !overlay.isDestroyed()) {
+      overlay.setIgnoreMouseEvents(true, { forward: true });
+      overlay.setFocusable(false);
+      overlay.hide();
+      // 短时间内反复切换可以直接复用窗口，闲置后释放独立的渲染进程。
+      clearTimeout(overlayReleaseTimer);
+      overlayReleaseTimer = setTimeout(() => {
+        overlayReleaseTimer = null;
+        if (overlayWin === overlay && !overlay.isDestroyed() && !overlay.isVisible()) overlay.destroy();
+      }, 3000);
+    }
   }
 
   persist();
@@ -1185,8 +1194,8 @@ let discReady = false;
 let discShown = false;
 let discHighlight = '';
 let chordState = createChordState();
-let gamepadSlot = null;
-let gamepadNeedsRelease = true;
+let activeGamepadSlot = null;
+const gamepadDevices = new Map();
 const gamepadPauses = new Set();
 
 function discSize() {
@@ -1307,44 +1316,78 @@ function hideDisc() {
 }
 
 function resetGamepadSession() {
-  if (chordState.l3) gamepadNeedsRelease = true;
+  activeGamepadSlot = null;
   chordState = createChordState();
   if (discShown) hideDisc();
   setHoldSpeed(false, 'gamepad');
 }
 
+function gamepadDeviceModels() {
+  return Array.from(gamepadDevices.values(), (device) => device.model);
+}
+
+function notifyGamepadDevices() {
+  sendTo(consoleWin, 'gamepad:devices', gamepadDeviceModels());
+}
+
 function handleGamepadFrame(frame) {
-  if (!settings.gamepad.enabled || !frame?.connected) {
+  const slot = frame?.slot;
+  if (!settings.gamepad.enabled || (!frame?.connected && slot === undefined)) {
     resetGamepadSession();
-    gamepadSlot = null;
-    gamepadNeedsRelease = true;
+    if (gamepadDevices.size) {
+      gamepadDevices.clear();
+      notifyGamepadDevices();
+    }
     return;
   }
-  if (frame.slot !== gamepadSlot) {
-    resetGamepadSession();
-    gamepadSlot = frame.slot;
-    gamepadNeedsRelease = true;
+  if (!frame.connected) {
+    if (slot === activeGamepadSlot) resetGamepadSession();
+    if (gamepadDevices.delete(slot)) notifyGamepadDevices();
+    return;
   }
+
   const pressed = !!frame.buttons[L3_BUTTON_INDEX];
+  const device = gamepadDevices.get(slot);
+  const freshPress = device?.pressed === false && pressed;
+  if (device) device.pressed = pressed;
+  else {
+    gamepadDevices.set(slot, { model: frame.model, pressed });
+    notifyGamepadDevices();
+  }
+
   if (gamepadPauses.size || typingInField || capturingHotkey ||
       (loginWin && BrowserWindow.getFocusedWindow() === loginWin)) {
-    resetGamepadSession();
-    gamepadNeedsRelease = pressed;
+    if (activeGamepadSlot !== null) resetGamepadSession();
     return;
   }
-  if (gamepadNeedsRelease) {
-    if (!pressed) gamepadNeedsRelease = false;
-    return;
-  }
+  // 圆盘归本次按下左摇杆的设备。首次报告就是按住时，先等该设备松开。
+  if (activeGamepadSlot === null && freshPress) activeGamepadSlot = slot;
+  if (activeGamepadSlot !== slot) return;
+
   const step = stepChord(chordState, frame, settings.gamepad);
   chordState = step.state;
-
-  if (step.active && !discShown) showDisc();
-  else if (!step.active && discShown) hideDisc();
-  if (step.active) pushDiscState(step.highlighted);
+  if (!step.active) {
+    activeGamepadSlot = null;
+    if (discShown) hideDisc();
+  } else {
+    if (!discShown) showDisc();
+    pushDiscState(step.highlighted);
+  }
   if (step.release) handleHotkey(step.release, 'up', 'gamepad');
   if (step.press) handleHotkey(step.press, 'down', 'gamepad');
   if (step.fired) handleHotkey(step.fired);
+}
+
+function setGamepadEnabled(enabled) {
+  if (settings.gamepad.enabled === enabled) return;
+  settings.gamepad.enabled = enabled;
+  if (enabled) {
+    gamepad.start(handleGamepadFrame);
+  } else {
+    stopGamepadPoller();
+    handleGamepadFrame(null);
+    if (discWin && !discWin.isDestroyed()) discWin.destroy();
+  }
 }
 
 function stopGamepadPoller() {
@@ -1520,6 +1563,7 @@ async function fetchVideoInfo(id) {
       ok: true,
       id: d.bvid || id,
       title: d.title || '',
+      cover: typeof d.pic === 'string' ? d.pic : '',
       owner: d.owner ? d.owner.name : '',
       pages: (d.pages || []).map((p) => ({ page: p.page, part: p.part, duration: p.duration }))
     };
@@ -1688,6 +1732,7 @@ function registerIpc() {
       // 手柄圆盘的可绑动作表要连白名单一起给界面，否则启动器会列出圆盘其实不认的动作
       gamepadDirs: GAMEPAD_DIR_UI,
       gamepadActions: GAMEPAD_ACTION_ALLOWLIST,
+      gamepadModels: gamepadDeviceModels(),
       failedHotkeys,
       initialUrl: OPEN_ARG,
       nav,
@@ -1717,8 +1762,7 @@ function registerIpc() {
     if (saveTimer) flushSettings();
     const hadLock = app.hasSingleInstanceLock();
     stopGamepadPoller();
-    resetGamepadSession();
-    gamepadNeedsRelease = true;
+    handleGamepadFrame(null);
     if (hadLock) app.releaseSingleInstanceLock();
     const result = await relaunchElevated();
     // UAC 被取消：把锁要回来，继续以普通权限运行
@@ -1832,6 +1876,7 @@ function registerIpc() {
 
   ipcMain.handle('settings:save', (_e, patch = {}) => {
     const playbackChanged = updatePlaybackSettings(settings, patch);
+    if (typeof patch.gamepadEnabled === 'boolean') setGamepadEnabled(patch.gamepadEnabled);
     if (HOLD_PLAYBACK_RATES.includes(patch.holdPlaybackRate)) settings.holdPlaybackRate = patch.holdPlaybackRate;
     if (typeof patch.hoverFadeEnabled === 'boolean') {
       settings.hoverFadeEnabled = patch.hoverFadeEnabled;
@@ -2024,11 +2069,13 @@ function registerIpc() {
     const sameVideo =
       settings.lastVideoId &&
       String(settings.lastVideoId).toLowerCase() === String(id).toLowerCase();
+    const cover = (info.ok && info.cover) || (sameVideo ? settings.lastCover : '') || '';
     noteWatched(settings, {
       text: payload.text,
       p,
       id,
       title: info.ok ? info.title : sameVideo ? settings.lastTitle : '',
+      cover,
       pageCount: pages.length || (sameVideo ? settings.lastPageCount : 0)
     });
     persist();
@@ -2042,6 +2089,7 @@ function registerIpc() {
       url: buildUrl(id, p),
       title: info.ok ? info.title : '',
       owner: info.ok ? info.owner : '',
+      cover,
       pages,
       message: info.ok ? '' : `读不到分 P 信息（${info.message}），已直接载入`
     };
@@ -2103,8 +2151,7 @@ if (!gotLock) {
     }
     createConsole(); // 先出启动器，配置好了再点「启动跟跑」
     registerHotkeys();
-    // XInput 轮询是个常驻子进程，关掉了就不该起它。手柄状态属 OS 层，
-    // 不存在「窗口建晚了要等解锁」这种事，随时起都行。
+    // Windows 手柄输入由独立子进程处理，关闭手柄快捷键时无需启动它。
     if (settings.gamepad.enabled) gamepad.start(handleGamepadFrame);
 
     // `--open BVxxx` 是从快捷方式直接带视频来的，那就顺手把浮窗也起来

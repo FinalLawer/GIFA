@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   // 手柄八方向圆盘的动作绑定；map 是「方位名 → 动作名」，缺的方位沿用当前设置
   updateGamepad: (map) => ipcRenderer.invoke('gamepad:update', map),
   resetGamepad: () => ipcRenderer.invoke('gamepad:reset'),
+  onGamepadDevices: (cb) => ipcRenderer.on('gamepad:devices', (_e, models) => cb(models)),
 
   // 方位标记：角度是高频数据，用单向 send 避免 invoke 的往返开销
   bearing: (payload) => ipcRenderer.send('overlay:bearing', payload),

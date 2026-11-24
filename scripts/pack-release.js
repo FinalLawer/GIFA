@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { createZip } = require('./zip-writer');
 const { verifyLicenseBundle } = require('./license-files');
+const gamepadHelperPath = require('../src/gamepad-helper-path');
 
 const ROOT = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -109,6 +110,14 @@ function copyDir(src, dst) {
   }
 }
 
+function verifyRuntimeBundle(directory) {
+  verifyLicenseBundle(directory);
+  const helper = gamepadHelperPath(path.join(directory, 'resources'));
+  if (!fs.statSync(helper, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`发行包缺少手柄辅助程序：${helper}，请重新构建`);
+  }
+}
+
 function stageGreen() {
   if (!fs.existsSync(UNPACKED)) throw new Error(`找不到 --dir 产物：${UNPACKED}`);
   const exe = 'GIFA.exe';
@@ -120,7 +129,7 @@ function stageGreen() {
     console.log(`\n组装绿色版：${UNPACKED} → ${STAGE}`);
     copyDir(UNPACKED, STAGE);
   }
-  verifyLicenseBundle(STAGE);
+  verifyRuntimeBundle(STAGE);
   fs.mkdirSync(path.join(STAGE, 'data'), { recursive: true });
   fs.writeFileSync(path.join(STAGE, 'portable.flag'), FLAG_TEXT, 'utf8');
   fs.writeFileSync(path.join(STAGE, 'README-绿色版.txt'), '\ufeff' + GREEN_README.replace(/\n/g, '\r\n'), 'utf8');
@@ -179,7 +188,7 @@ async function main() {
     console.log(`\n复用已有 --dir 产物：${UNPACKED}`);
   }
 
-  verifyLicenseBundle(UNPACKED);
+  verifyRuntimeBundle(UNPACKED);
 
   let zipFile = null;
   let setupFile = null;

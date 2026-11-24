@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const { verifyZip } = require('./zip-writer');
 const asar = require('@electron/asar');
 const { LICENSE_FILES, EXTRA_LICENSE_FILES, verifyLicenseBundle } = require('./license-files');
+const gamepadHelperPath = require('../src/gamepad-helper-path');
 
 const ROOT = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -77,6 +78,10 @@ if (has(ZIP)) {
   const hasEntry = (n) => z.names.includes('GIFA/' + n);
   check('主程序 GIFA.exe 条目', hasEntry('GIFA.exe'), true);
   check('app.asar 条目', z.names.some((n) => n.endsWith('resources/app.asar')), true);
+  const helper = gamepadHelperPath('resources').split(path.sep).join('/');
+  const zippedHelper = z.read('GIFA/' + helper);
+  const builtHelper = path.join(OUT, 'win-unpacked', helper);
+  check('安装版源目录与绿色版均收录同一手柄程序', !!zippedHelper && has(builtHelper) && zippedHelper.equals(read(builtHelper)) && zippedHelper.toString('ascii', 0, 2) === 'MZ', true);
   check('portable.flag', hasEntry('portable.flag'), true);
   check('绿色版说明', hasEntry('README-绿色版.txt'), true);
   check('data/ 目录项', hasEntry('data/'), true);
