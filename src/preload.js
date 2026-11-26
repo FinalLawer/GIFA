@@ -8,6 +8,17 @@ contextBridge.exposeInMainWorld('api', {
   action: (name, payload) => ipcRenderer.invoke('win:action', name, payload),
   load: (payload) => ipcRenderer.invoke('bili:load', payload),
   nav: () => ipcRenderer.invoke('bili:nav'),
+  updateStatus: () => ipcRenderer.invoke('update:status'),
+  updateCheck: () => ipcRenderer.invoke('update:check'),
+  updateDownload: () => ipcRenderer.invoke('update:download'),
+  updateCancel: () => ipcRenderer.invoke('update:cancel'),
+  updateInstall: () => ipcRenderer.invoke('update:install'),
+  updateOpenReleases: () => ipcRenderer.invoke('update:open-releases'),
+  onUpdateState: (callback) => {
+    const listener = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on('update:state', listener);
+    return () => { ipcRenderer.removeListener('update:state', listener); };
+  },
   // 游戏内热键需要管理员身份（UIPI），由用户在启动器里按需触发 UAC 提权重启
   relaunchElevated: () => ipcRenderer.invoke('app:relaunch-elevated'),
   updateHotkeys: (hotkeys) => ipcRenderer.invoke('hotkeys:update', hotkeys),

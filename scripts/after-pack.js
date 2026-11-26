@@ -6,6 +6,7 @@ const path = require('node:path');
 const asar = require('@electron/asar');
 const { LICENSE_DIR, ELECTRON_LICENSE_FILES, verifyLicenseBundle } = require('./license-files');
 const { compileGamepadHelper } = require('./build-gamepad-helper');
+const { buildUpdateHelper } = require('./build-update-helper');
 const gamepadHelperPath = require('../src/gamepad-helper-path');
 
 function organizeWindowsResources(appOutDir) {
@@ -54,6 +55,8 @@ function organizeWindowsResources(appOutDir) {
 module.exports = async function afterPack({ appOutDir, electronPlatformName }) {
   if (electronPlatformName !== 'win32') return;
   organizeWindowsResources(appOutDir);
-  compileGamepadHelper(gamepadHelperPath(path.resolve(appOutDir, 'resources')));
+  const resources = path.resolve(appOutDir, 'resources');
+  compileGamepadHelper(gamepadHelperPath(resources));
+  buildUpdateHelper(resources);
 };
 module.exports.organizeWindowsResources = organizeWindowsResources;

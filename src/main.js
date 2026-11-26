@@ -8,8 +8,10 @@
 const { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFile, execFileSync, spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const { createUpdateController, installExitHook, resolveUpdater } = require('./update-controller');
+const { githubClient, RELEASES_PAGE } = require('./update-github');
 const hookHotkeys = require('./hook-hotkeys');
 const gamepad = require('./gamepad');
 const { mergeHotkeys, prepareHotkeyUpdate } = require('./hotkey-config');
@@ -549,14 +551,31 @@ function loadSettings() {
   }
 }
 
-function flushSettings() {
+function flushSettings(atomic = false) {
   clearTimeout(saveTimer);
   saveTimer = null;
+  const file = settingsFile();
+  let temporaryDir;
   try {
-    fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-    fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const contents = JSON.stringify(settings, null, 2);
+    if (atomic) {
+      temporaryDir = fs.mkdtempSync(path.join(path.dirname(file), '.settings-'));
+      const temporary = path.join(temporaryDir, 'settings.json');
+      fs.writeFileSync(temporary, contents, { encoding: 'utf8', flag: 'wx', flush: true });
+      fs.renameSync(temporary, file);
+    } else {
+      fs.writeFileSync(file, contents, 'utf8');
+    }
+    return true;
   } catch (err) {
     console.error('[settings] 写入失败', err);
+    return false;
+  } finally {
+    if (temporaryDir) {
+      try { fs.unlinkSync(path.join(temporaryDir, 'settings.json')); } catch {}
+      try { fs.rmdirSync(temporaryDir); } catch {}
+    }
   }
 }
 
@@ -2098,6 +2117,88 @@ function registerIpc() {
 
 /* ---------------------------------------------------------------- 生命周期 */
 
+let updates;
+
+function updateSender(event) {
+  return consoleWin && !consoleWin.isDestroyed() && event.sender === consoleWin.webContents &&
+    event.senderFrame && event.senderFrame === consoleWin.webContents.mainFrame &&
+    event.senderFrame.url === pathToFileURL(path.join(__dirname, 'console', 'index.html')).href;
+}
+
+async function registerUpdates() {
+  const directory = programDir();
+  const resources = process.resourcesPath;
+  const updater = await resolveUpdater({
+    packaged: app.isPackaged, platform: process.platform, arch: process.arch, mode: installMode, programDir: directory,
+    resourcesPath: resources, selfExtracting: !!(process.env.PORTABLE_EXECUTABLE_DIR || process.env.PORTABLE_EXECUTABLE_FILE)
+  });
+  const version = app.getVersion();
+  updates = createUpdateController({
+    version, updater, client: githubClient(), tempDir: app.getPath('temp'),
+    updated: process.argv.includes('--gifa-updated'),
+    onState: state => sendTo(consoleWin, 'update:state', state),
+    async confirmInstall(targetVersion) {
+      if (overlayPlacing || capturingHotkey || (loginWin && !loginWin.isDestroyed())) {
+        throw new Error('请先完成登录、快捷键录制或方位标定，再安装更新。');
+      }
+      const result = await dialog.showMessageBox(consoleWin, {
+        type: 'question', title: '安装 GIFA 更新', message: `重启并更新到 v${targetVersion}？`,
+        detail: '浮窗播放器将停止，更新后会重新启动 GIFA。你的设置、标定和 B 站登录状态会保留。',
+        buttons: ['稍后', '重启并安装'], cancelId: 0, defaultId: 0, noLink: true
+      });
+      return result.response === 1;
+    },
+    async prepareInstall({ manifestPath, artifactPath }) {
+      if (!isElevated()) throw new Error('请以管理员身份运行 GIFA，再安装更新。');
+      if (updater.mode === 'installed' && fs.existsSync(path.join(directory, 'data'))) {
+        throw new Error('安装目录仍有旧绿色版的 data，请先将它备份并迁出，再安装更新。');
+      }
+      if (!flushSettings(true)) throw new Error('无法保存当前设置，未启动更新器。');
+      try { await biliSession().cookies.flushStore(); }
+      catch { throw new Error('无法刷新本地登录状态，未启动更新器。'); }
+      const args = ['--apply', updater.mode, directory, String(process.pid), version, manifestPath, artifactPath];
+      await new Promise((resolve, reject) => {
+        execFile(updater.helper, args, { windowsHide: true, timeout: 180000 }, (error, _stdout, stderr) => {
+          if (!error) return resolve();
+          const code = /^GIFA_UPDATE_ERROR ([A-Z_]+)$/.exec(stderr.trim())?.[1];
+          const messages = {
+            LEGACY_DATA: '安装目录仍有旧绿色版的 data，请先将它备份并迁出。',
+            SCOPE: '无法确认原安装位置或安装范围，请到官方发布页手动升级。',
+            UNSAFE_PATH: '当前目录的权限或路径不支持安全更新，请到官方发布页手动升级。',
+            INTERRUPTED: '检测到上次更新留下的备份。请先保留备份和 data，再手动修复。',
+            NO_KEY: '此构建未配置更新公钥，请从官方发布页获取新版。',
+            NOT_ELEVATED: '请以管理员身份运行 GIFA，再安装更新。',
+            BUSY: '另一个更新或 GIFA 实例正在运行，请关闭后重试。'
+          };
+          console.warn('[update] helper preflight:', error.code, code || 'PREPARE_FAILED');
+          reject(new Error(messages[code] || '更新器无法准备安装，请检查文件占用和可用空间。'));
+        });
+      });
+    },
+    quit: () => app.quit()
+  });
+
+  const actions = {
+    status: updates.snapshot,
+    check: updates.check,
+    download: updates.download,
+    cancel: updates.cancel,
+    install: updates.install,
+    'open-releases': async () => {
+      await shell.openExternal(RELEASES_PAGE);
+      return updates.snapshot();
+    }
+  };
+  for (const [action, handle] of Object.entries(actions)) {
+    ipcMain.handle('update:' + action, event => {
+      if (!updateSender(event)) throw new Error('无权使用更新服务');
+      return handle();
+    });
+  }
+
+  installExitHook(app, updates);
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -2146,10 +2247,14 @@ if (!gotLock) {
       /* ignore */
     }
     registerIpc();
+    await registerUpdates().catch(error => console.warn('[update] initialization failed:', error.message));
     for (const event of ['display-added', 'display-removed', 'display-metrics-changed']) {
       screen.on(event, fitImmersionWindow);
     }
-    createConsole(); // 先出启动器，配置好了再点「启动跟跑」
+    const launcher = createConsole(); // 先出启动器，配置好了再点「启动跟跑」
+    launcher.on('close', event => {
+      if (updates?.isPreparing()) event.preventDefault();
+    });
     registerHotkeys();
     // Windows 手柄输入由独立子进程处理，关闭手柄快捷键时无需启动它。
     if (settings.gamepad.enabled) gamepad.start(handleGamepadFrame);
