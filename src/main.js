@@ -350,6 +350,7 @@ function biliSession() {
 /** 用该分区的 Cookie 发请求，避开 B 站风控，并且能读到登录态 */
 function biliFetch(url, extraHeaders) {
   return biliSession().fetch(url, {
+    signal: AbortSignal.timeout(8000),
     headers: {
       'User-Agent': UA,
       Referer: 'https://www.bilibili.com/',
@@ -651,13 +652,8 @@ function cancelTemporarySpeed() {
 function attachPlaybackGuest(guest) {
   playbackGuest = guest;
   immersionAspect = 0;
+  // 首次附加立即静音。之后由新文档的同步 player:settings 再次静音，取消导航时保留原文档的声音。
   guest.setAudioMuted(true);
-  guest.on('did-start-navigation', (details) => {
-    if (details.isMainFrame && !details.isSameDocument) {
-      guest.setAudioMuted(true);
-      if (playbackGuest === guest) immersionAspect = 0;
-    }
-  });
   guest.on('render-process-gone', () => {
     if (playbackGuest === guest) immersionAspect = 0;
   });
@@ -667,6 +663,26 @@ function attachPlaybackGuest(guest) {
       immersionAspect = 0;
     }
   });
+}
+
+function isPlaybackPage(value, requireVideoPath = true) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.origin === 'https://www.bilibili.com' && !url.username && !url.password &&
+      (!requireVideoPath || /^\/video\/(?:BV[0-9A-Za-z]{10}|av\d+)\/?$/.test(url.pathname));
+  } catch {
+    return false;
+  }
+}
+
+function supportsPlaybackCompatibility() {
+  return process.platform === 'win32' && sandboxGuard.mode === 'normal';
+}
+
+function isPlaybackSandboxCrash(details) {
+  return (details.reason === 'crashed' || details.reason === 'abnormal-exit') &&
+    (details.exitCode >>> 0) === 0x80000003;
 }
 
 /* ------------------------------------------------------------------ 窗口 */
@@ -768,10 +784,44 @@ function createWindow() {
   // webview 里的 <video> 一旦走 HTML 全屏，它会铺满整个客户区并盖住我们自己的
   // 标题栏和设置按钮 —— 这是「视频全屏后找不到设置」的根因。直接禁掉，
   // 让 B 站播放器的全屏按钮改走窗口全屏（见 webview-preload 里的 requestFullscreen 改写）。
-  win.webContents.on('will-attach-webview', (_e, prefs) => {
-    prefs.disableHtmlFullscreen = true;
+  let compatibilityAvailable = false;
+  win.webContents.on('will-attach-webview', (event, prefs, params) => {
+    if (params.partition !== BILI_PARTITION || !isPlaybackPage(params.src)) {
+      event.preventDefault();
+      return;
+    }
+    Object.assign(prefs, {
+      preload: path.join(__dirname, 'webview-preload.js'),
+      disableHtmlFullscreen: true,
+      sandbox: !compatibilityAvailable || prefs.sandbox !== false,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      nodeIntegrationInWorker: false,
+      contextIsolation: true,
+      webSecurity: true,
+      webviewTag: false
+    });
   });
-  win.webContents.on('did-attach-webview', (_e, guest) => attachPlaybackGuest(guest));
+  win.webContents.on('did-attach-webview', (_event, guest) => {
+    attachPlaybackGuest(guest);
+    let navigated = false;
+    guest.setWindowOpenHandler(() => ({ action: 'deny' }));
+    guest.on('will-navigate', (event) => {
+      if (!isPlaybackPage(event.url, false)) event.preventDefault();
+    });
+    guest.on('will-redirect', (event) => {
+      if (event.isMainFrame && !isPlaybackPage(event.url, false)) event.preventDefault();
+    });
+    guest.once('did-navigate', () => { navigated = true; });
+    guest.on('render-process-gone', (_gone, details) => {
+      if (!isPlaybackGuest(guest) || details.reason === 'clean-exit') return;
+      if (!navigated && supportsPlaybackCompatibility() && isPlaybackSandboxCrash(details)) compatibilityAvailable = true;
+      sandboxGuard.log('bili-render-gone', JSON.stringify({ ...details, beforeNavigation: !navigated }));
+    });
+    guest.on('preload-error', () => {
+      if (isPlaybackGuest(guest)) sandboxGuard.log('bili-preload-error', '播放页访客脚本加载失败');
+    });
+  });
   win.webContents.on('render-process-gone', () => {
     cancelTemporarySpeed();
     if (win && !win.isDestroyed()) setImmersion(false);
@@ -1755,9 +1805,7 @@ function registerIpc() {
       failedHotkeys,
       initialUrl: OPEN_ARG,
       nav,
-      // 框选圆环的出厂初值。**不进标定列表**，只用来决定第一次打开标定时圆环落在哪，
-      // 免得一打开就偏到画面外、用户点「完成」直接存下一个错区域。
-      webviewPreload: pathToFileURL(path.join(__dirname, 'webview-preload.js')).href,
+      playbackCompatibility: supportsPlaybackCompatibility(),
       version: app.getVersion(),
       // 界面要能一眼看出「单键/侧键的全局钩子到底起来了没有」，
       // 否则热键不响应时只能靠猜
@@ -2033,6 +2081,9 @@ function registerIpc() {
       case 'minimize':
         win.minimize();
         break;
+      case 'open-video-browser':
+        if (_e.sender !== win.webContents || _e.senderFrame !== _e.sender.mainFrame || !isPlaybackPage(payload)) return false;
+        return shell.openExternal(payload).then(() => true, () => false);
       case 'close':
         // 只关跟跑浮窗，不退出程序 —— 启动器还在，随时可以再点「启动跟跑」。
         // 反方向不一样：关启动器会连带收掉所有窗口并退出（见 createConsole）。
@@ -2075,12 +2126,17 @@ function registerIpc() {
     return true;
   });
 
+  let latestVideoLoad = 0;
   ipcMain.handle('bili:load', async (_e, payload = {}) => {
+    const load = ++latestVideoLoad;
     const resolved = await resolveInput(payload.text);
+    if (load !== latestVideoLoad) return { ok: false, message: '已发出新的播放请求' };
     if (!resolved.ok) return { ok: false, message: resolved.message };
 
     const p = Number(payload.p) || resolved.p || 1;
     const info = await fetchVideoInfo(resolved.id);
+    // 旧请求迟到时不能覆盖当前视频的观看记录。
+    if (load !== latestVideoLoad) return { ok: false, message: '已发出新的播放请求' };
     const id = (info.ok && info.id) || resolved.id;
     const pages = info.ok ? info.pages : [];
 

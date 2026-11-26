@@ -231,7 +231,7 @@ function addedVideo(records) {
 const EVENTS = [
   'play', 'pause', 'timeupdate', 'durationchange', 'loadedmetadata',
   'ratechange', 'volumechange', 'ended', 'waiting', 'playing',
-  'seeking', 'seeked', 'error', 'canplay', 'emptied', 'resize'
+  'seeking', 'seeked', 'error', 'loadeddata', 'canplay', 'emptied', 'resize'
 ];
 
 function bind(v) {
@@ -346,7 +346,10 @@ function idFromUrl(u) {
 function snapshot() {
   const p = partFromUrl(location.href);
   const vid = idFromUrl(location.pathname);
-  if (!video || !video.isConnected) return { found: false, p, vid };
+  if (!video || !video.isConnected) {
+    const verification = /^(验证码|安全验证)\s*[_-]\s*(哔哩哔哩|bilibili)/i.test(document.title);
+    return { found: false, p, vid, verification };
+  }
   const d = video.duration;
   return {
     found: true,
@@ -358,7 +361,8 @@ function snapshot() {
     rate: video.playbackRate || 1,
     muted: video.muted || video.volume === 0,
     volume: video.muted ? 0 : video.volume,
-    ready: video.readyState >= 3,
+    ready: video.readyState >= 2,
+    mediaError: video.error?.code || 0,
     title: document.title.replace(/\s*[-_]\s*bilibili.*$/i, '').trim()
   };
 }

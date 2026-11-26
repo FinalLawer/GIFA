@@ -1,7 +1,7 @@
 {
   "name": "genshin-route-buddy",
   "productName": "原神跟跑助手",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "B站攻略视频悬浮窗：置顶于原神之上，自动读取视频里的角色朝向并在自己的小地图上标出",
   "main": "src/main.js",
   "author": "FinalLawer",
@@ -21,7 +21,7 @@
     "test:license": "node scripts/license-test.js",
     "test:materials": "node scripts/material-paths-test.js",
     "test:data-dir": "node scripts/data-dir-test.js",
-    "test:playback": "node scripts/playback-settings-test.js && node scripts/playback-media-test.js",
+    "test:playback": "node --test scripts/player-loading-test.js && node scripts/playback-settings-test.js && node scripts/playback-media-test.js",
     "test:login": "node scripts/login-test.js",
     "test:sandbox": "node scripts/sandbox-fallback-test.js && node scripts/sandbox-fallback-live-test.js",
     "test:gamepad": "node scripts/gamepad-poller-test.js && node scripts/gamepad-sony-test.js && node --test scripts/gamepad-controls-test.js",

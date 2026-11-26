@@ -20,10 +20,10 @@
 
 | 版本 | 直接下载 | 适合 | 设置保存在 |
 | --- | --- | --- | --- |
-| **zip 绿色版** | [GIFA-0.2.7-win-x64.zip](https://github.com/FinalLawer/GIFA/releases/download/v0.2.7/GIFA-0.2.7-win-x64.zip) | 解压后双击即用，可将整个文件夹拷走 | 程序目录里的 `data\` |
-| **安装版** | [GIFA-0.2.7-Setup.exe](https://github.com/FinalLawer/GIFA/releases/download/v0.2.7/GIFA-0.2.7-Setup.exe) | 需要开始菜单、桌面快捷方式或卸载器 | `%APPDATA%\原神跟跑助手\` |
+| **zip 绿色版** | [GIFA-0.2.8-win-x64.zip](https://github.com/FinalLawer/GIFA/releases/download/v0.2.8/GIFA-0.2.8-win-x64.zip) | 解压后双击即用，可将整个文件夹拷走 | 程序目录里的 `data\` |
+| **安装版** | [GIFA-0.2.8-Setup.exe](https://github.com/FinalLawer/GIFA/releases/download/v0.2.8/GIFA-0.2.8-Setup.exe) | 需要开始菜单、桌面快捷方式或卸载器 | `%APPDATA%\原神跟跑助手\` |
 
-绿色版解压后的顶层目录为 `GIFA/`，主程序为 `GIFA.exe`。发行页注明对应的源码提交，并附 `GIFA-0.2.7-source.zip`。
+绿色版解压后的顶层目录为 `GIFA/`，主程序为 `GIFA.exe`。发行页注明对应的源码提交，并附 `GIFA-0.2.8-source.zip`。
 
 Windows x64 包只包含简体中文与英语回退语言资源、对应架构的快捷键原生模块和必需运行文件；不附带 Electron 示例启动包、其他平台模块、C/C++ 开发源码或调试映射。第三方源码获取与构建信息见 `resources/licenses/libuiohook-NOTICE.txt`，源码仓库和 npm 依赖仍保留完整开发文件。
 
