@@ -440,6 +440,9 @@ function fillSettings(settings) {
   renderGamepadDevices(settings);
   $('setImmersion').checked = state.immersion;
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
+  $('setStoryHide').checked = !!(settings.storyAutoHide && settings.storyAutoHide.enabled);
+  // 老 settings.json 可能没有 showBox 字段，默认显示（排查期需要它）
+  $('setStoryBox').checked = !(settings.storyAutoHide && settings.storyAutoHide.showBox === false);
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -477,6 +480,16 @@ function wireSettings() {
     const enabled = event.target.checked;
     state.boot.settings.hoverFadeEnabled = enabled;
     window.api.save({ hoverFadeEnabled: enabled });
+  });
+  $('setStoryHide').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.storyAutoHide = { ...(state.boot.settings.storyAutoHide || {}), enabled: on, hideFloat: on };
+    window.api.save({ storyAutoHide: { enabled: on, hideFloat: on } });
+  });
+  $('setStoryBox').addEventListener('change', (event) => {
+    const showBox = event.target.checked;
+    state.boot.settings.storyAutoHide = { ...(state.boot.settings.storyAutoHide || {}), showBox };
+    window.api.save({ storyAutoHide: { showBox } });
   });
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);
