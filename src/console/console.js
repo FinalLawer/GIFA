@@ -440,6 +440,10 @@ function fillSettings(settings) {
   renderGamepadDevices(settings);
   $('setImmersion').checked = state.immersion;
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
+  $('setGreenArc').checked = settings.enableVisionGreenArc === true;
+  $('setCloseToTray').checked = settings.closeToTray !== false;
+  $('setAvoidHide').checked = settings.avoidHideEnabled !== false;
+  $('setCombatFade').checked = settings.combatFadeEnabled !== false;
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -478,6 +482,17 @@ function wireSettings() {
     state.boot.settings.hoverFadeEnabled = enabled;
     window.api.save({ hoverFadeEnabled: enabled });
   });
+  const saveSwitch = (id, key) => {
+    $(id).addEventListener('change', (event) => {
+      const on = event.target.checked;
+      state.boot.settings[key] = on;
+      window.api.save({ [key]: on });
+    });
+  };
+  saveSwitch('setGreenArc', 'enableVisionGreenArc');
+  saveSwitch('setCloseToTray', 'closeToTray');
+  saveSwitch('setAvoidHide', 'avoidHideEnabled');
+  saveSwitch('setCombatFade', 'combatFadeEnabled');
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);
     if (!HOLD_RATES.includes(holdRate)) return;
