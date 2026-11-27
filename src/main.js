@@ -5,7 +5,7 @@
  * 职责：无边框置顶窗口、全局快捷键、B 站视频解析、设置持久化
  */
 
-const { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, nativeImage, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile, execFileSync, spawn } = require('node:child_process');
@@ -440,7 +440,19 @@ const DEFAULT_SETTINGS = {
     y: null
   },
   // 手柄：L3 按住弹八方向圆盘，右摇杆选动作。结构与出厂值都在 gamepad-config.js
-  gamepad: DEFAULT_GAMEPAD
+  gamepad: DEFAULT_GAMEPAD,
+  /* 托盘：关启动器时缩到托盘而不是退出 */
+  closeToTray: true,
+  // 单击托盘图标时干什么：console = 显示启动器，float = 显示/隐藏浮窗
+  trayClickAction: 'console',
+  /* 绿弧开关：镜头朝向扇形识别。低画质下极易乱飘，默认关闭省 CPU */
+  enableVisionGreenArc: false,
+  /* 防遮挡：字幕提到地图/锚点/传送时临时取消变淡 */
+  avoidHideEnabled: true,
+  avoidHideHold: 4,
+  /* 战斗淡出：检测到连点/长按/Q/R 时临时压暗 */
+  combatFadeEnabled: true,
+  combatOpacity: 75
 };
 
 /**
@@ -898,10 +910,24 @@ function notifyFloatState() {
   broadcast('float:state', floatState());
 }
 
+/** 浮窗当前该用的不透明度：防遮挡 > 战斗压暗 > 悬停变淡 */
+function effectiveOpacity() {
+  const now = Date.now();
+  const base = Number(settings.opacity);
+  const opacity = Number.isFinite(base) ? base : 1;
+  // 防遮挡期间保持原透明度，不被战斗压暗覆盖
+  if (now < avoidUntil) return opacity;
+  if (now < combatUntil) {
+    const pct = Number(settings.combatOpacity);
+    return Math.min(opacity, (Number.isFinite(pct) ? pct : 75) / 100);
+  }
+  return hoverFaded ? Math.min(opacity, 0.1) : opacity;
+}
+
 function applyWindowPresentation() {
   if (!win || win.isDestroyed()) return;
   win.setIgnoreMouseEvents(immersion || settings.clickThrough, { forward: true });
-  win.setOpacity(hoverFaded ? Math.min(settings.opacity, 0.1) : settings.opacity);
+  win.setOpacity(effectiveOpacity());
 }
 
 function updateHoverFade() {
@@ -929,6 +955,145 @@ function syncHoverFade() {
   hoverFaded = false;
   applyWindowPresentation();
   if (immersion && settings.hoverFadeEnabled) hoverTimer = setInterval(updateHoverFade, 60);
+}
+
+function showConsoleWindow() {
+  if (consoleWin && !consoleWin.isDestroyed()) {
+    if (consoleWin.isMinimized()) consoleWin.restore();
+    consoleWin.show();
+    consoleWin.focus();
+    return;
+  }
+  createConsole();
+}
+
+function trayIcon() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.ico'));
+  if (icon.isEmpty()) console.log('图标加载失败');
+  return icon;
+}
+
+/** 托盘菜单里的「退出软件」：绕开 closeToTray，直接收干净 */
+function quitFromTray() {
+  quittingFromConsole = true;
+  for (const w of [win, overlayWin, loginWin, subtitleWin, danmakuWin, consoleWin]) {
+    try {
+      if (w && !w.isDestroyed()) w.destroy();
+    } catch {
+      /* 关窗失败不影响退出 */
+    }
+  }
+  app.quit();
+}
+
+function rebuildTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const floatAlive = !!(win && !win.isDestroyed());
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示启动器', click: () => showConsoleWindow() },
+      {
+        label: floatAlive ? '隐藏 / 显示浮窗' : '浮窗未启动',
+        enabled: floatAlive,
+        click: () => toggleVisible()
+      },
+      { type: 'separator' },
+      {
+        label: '关闭启动器时最小化到托盘',
+        type: 'checkbox',
+        checked: settings.closeToTray !== false,
+        click: (item) => {
+          settings.closeToTray = !!item.checked;
+          persist();
+          // 控制台里也有同一个开关，改完要同步过去，否则两边显示不一致
+          broadcast('settings:changed', settings);
+        }
+      },
+      { type: 'separator' },
+      { label: '退出软件', click: () => quitFromTray() }
+    ])
+  );
+}
+
+function createTray() {
+  if (tray && !tray.isDestroyed()) return tray;
+  tray = new Tray(trayIcon());
+  tray.setToolTip('原神跟跑助手 · 单击显示启动器');
+  rebuildTrayMenu();
+  tray.on('click', () => {
+    if (settings.trayClickAction === 'float') toggleVisible();
+    else showConsoleWindow();
+  });
+  tray.on('double-click', () => showConsoleWindow());
+  return tray;
+}
+
+function destroyTray() {
+  if (!tray || tray.isDestroyed()) {
+    tray = null;
+    return;
+  }
+  tray.destroy();
+  tray = null;
+}
+
+function notifyFloatState() {
+  broadcast('float:state', floatState());
+  // 托盘菜单里的「隐藏 / 显示浮窗」要跟着浮窗是否存在切换可用状态
+  rebuildTrayMenu();
+}
+
+/** 智能防遮挡：字幕里出现看地图类的词 */
+function markAvoidHide() {
+  if (!settings.avoidHideEnabled) return;
+  const hold = Math.max(1, Math.min(30, Number(settings.avoidHideHold) || 4)) * 1000;
+  avoidUntil = Date.now() + hold;
+  applyWindowPresentation();
+  clearTimeout(avoidTimer);
+  avoidTimer = setTimeout(() => {
+    avoidUntil = 0;
+    applyWindowPresentation();
+  }, hold + 30);
+}
+
+/** 战斗防遮挡：Q/R 或连点左键 */
+function markCombat() {
+  if (!settings.combatFadeEnabled || !immersion) return;
+  combatUntil = Date.now() + 3000;
+  applyWindowPresentation();
+  clearTimeout(combatTimer);
+  combatTimer = setTimeout(() => {
+    combatUntil = 0;
+    applyWindowPresentation();
+  }, 3030);
+}
+
+/** 钩子里的原始事件：只关心 Q / R 和左键 */
+function onRawHookEvent(ev) {
+  if (!ev || !settings.combatFadeEnabled || !immersion) return;
+  if (ev.kind === 'key') {
+    const q = hookHotkeys.keycodeOf('Q');
+    const r = hookHotkeys.keycodeOf('R');
+    if ((q && ev.code === q) || (r && ev.code === r)) markCombat();
+    return;
+  }
+  if (ev.kind === 'mouse' && ev.button === 1) {
+    combatDownAt = Date.now();
+    const now = Date.now();
+    combatClicks = combatClicks.filter((t) => now - t < 2000);
+    combatClicks.push(now);
+    // 2 秒内点 3 下
+    if (combatClicks.length >= 3) {
+      combatClicks = [];
+      markCombat();
+    }
+    return;
+  }
+  if (ev.kind === 'mouseup' && ev.button === 1) {
+    // 长按 0.5 秒也算战斗动作
+    if (combatDownAt && Date.now() - combatDownAt >= 500) markCombat();
+    combatDownAt = 0;
+  }
 }
 
 function sameWindowBounds(first, second) {
@@ -1123,6 +1288,14 @@ setInterval(() => {
 /* ------------------------------------------------------- 方位标记叠加层 */
 
 let overlayWin = null;
+// 托盘
+let tray = null;
+// 战斗检测：连点 / 长按 / Q R
+let combatDownAt = 0;
+let combatClicks = [];
+let combatUntil = 0;
+// 防遮挡到期时刻：字幕提到看地图类词时临时取消变淡
+let avoidUntil = 0;
 let overlayReleaseTimer = null;
 let overlayPlacing = false;
 let lastBearing = null;
@@ -1572,7 +1745,11 @@ function registerHotkeys() {
       if (typingInField) return true;
       const focused = BrowserWindow.getFocusedWindow();
       return !!focused && focused === loginWin;
-    }
+    },
+    /* 原始事件通道：绑定表只认「已配过热键的动作」，
+     * 但战斗检测需要知道用户按了 Q/R 或连点左键 —— 那些可能根本没绑热键。
+     * 单独开一条通道，和绑定逻辑互不影响。 */
+    onRawHookEvent
   );
 
   if (hookState.needed && !hookState.ok) {
@@ -1962,6 +2139,30 @@ function registerIpc() {
       syncHoverFade();
       notifyFloatState();
     }
+    /* 托盘 / 绿弧 / 防遮挡 / 战斗淡出 */
+    if (patch.closeToTray !== undefined) {
+      settings.closeToTray = !!patch.closeToTray;
+      rebuildTrayMenu();
+    }
+    if (patch.trayClickAction !== undefined) {
+      settings.trayClickAction = patch.trayClickAction === 'float' ? 'float' : 'console';
+      rebuildTrayMenu();
+    }
+    if (patch.enableVisionGreenArc !== undefined) {
+      settings.enableVisionGreenArc = !!patch.enableVisionGreenArc;
+      // 关掉绿弧时访客页会跳过扇形识别，配置要立刻重发一次
+      broadcast('settings:changed', settings);
+    }
+    for (const key of ['avoidHideEnabled', 'combatFadeEnabled']) {
+      if (typeof patch[key] === 'boolean') settings[key] = patch[key];
+    }
+    if (Number.isFinite(Number(patch.avoidHideHold))) {
+      settings.avoidHideHold = Math.max(1, Math.min(30, Number(patch.avoidHideHold)));
+    }
+    if (Number.isFinite(Number(patch.combatOpacity))) {
+      settings.combatOpacity = Math.max(0, Math.min(100, Number(patch.combatOpacity)));
+      applyWindowPresentation();
+    }
     if (playbackChanged || patch.holdPlaybackRate !== undefined) publishPlaybackSettings();
     // 自动连播 / 手动切 P 只带 lastPart：页码和时间要一起刷新，
     // 否则启动器上的「上次看到」会一直停在第一次打开视频那一刻。
@@ -2315,6 +2516,7 @@ if (!gotLock) {
       /* ignore */
     }
     registerIpc();
+    createTray(); // 先建托盘：启动器被收进托盘后还要有个入口能叫回来
     await registerUpdates().catch(error => console.warn('[update] initialization failed:', error.message));
     for (const event of ['display-added', 'display-removed', 'display-metrics-changed']) {
       screen.on(event, fitImmersionWindow);

@@ -270,7 +270,9 @@ function syncBearingToGuest() {
     roi: layout?.roi || null,
     layoutId: layout?.id,
     revision: layout?.revision,
-    autoCenter: !!layout && !layout.centered
+    autoCenter: !!layout && !layout.centered,
+    // 视觉绿弧：不传的话访客页一直是默认 false，绿弧永远不画
+    greenArc: state.boot.settings.enableVisionGreenArc === true
   });
 }
 

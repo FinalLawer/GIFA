@@ -389,6 +389,9 @@ function push(force) {
  */
 const BEARING = {
   enabled: false,
+  /* 视觉绿弧（镜头朝向扇形识别）。低画质下极易乱飘，而且每帧要扫一次
+   * 512px 窗口，默认关闭。关掉时整段扇形识别都不跑，省一大截 CPU。 */
+  greenArc: false,
   roi: null,
   layoutId: null,
   revision: 0,
@@ -2152,7 +2155,7 @@ try {
       const r = analyze(g.img, g.size, g.step);
       // 顺手把扇形也跑一遍，方便一次拿到两路证据做对比（同样用大窗口）
       const gc = grabCenter(roi || BEARING.roi, 1.5, 512);
-      const c = gc ? analyzeCone(gc.img, gc.size, gc.step) : null;
+      const c = gc && BEARING.greenArc ? analyzeCone(gc.img, gc.size, gc.step) : null;
       return { ok: true, size: g.size, step: g.step, ...r, cone: c, ab: { ...BEARING.ab } };
     },
     // 放大导出：像素级看清箭头到底是三角形、还是只有描边的空心块
@@ -2538,6 +2541,9 @@ function setBearing(config = {}) {
       else bind(pickVideo());
     }
   }
+
+  // 视觉绿弧：关掉时整段扇形识别都不跑，每帧省一次 512px 窗口扫描
+  if (config.greenArc !== undefined) BEARING.greenArc = !!config.greenArc;
 
   if (config.dump) {
     const sample = BEARING.roi ? grabCenter(BEARING.roi) : null;
