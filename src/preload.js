@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('api', {
 
   onHotkey: (cb) => ipcRenderer.on('hotkey', (_e, action) => cb(action)),
   onNotice: (cb) => ipcRenderer.on('app:notice', (_e, text) => cb(text)),
+  /* 字幕文本：主进程把当前这句推过来，浮窗据此判方位、触发清怪暂停 */
+  onCompassText: (cb) => ipcRenderer.on('compass-text', (_e, p) => cb(p)),
   onPlaybackState: (cb) => ipcRenderer.on('playback:state', (_e, state) => cb(state)),
   onWinState: (cb) => ipcRenderer.on('win:state', (_e, state) => cb(state)),
   onLogin: (cb) => ipcRenderer.on('login:state', (_e, nav) => cb(nav)),

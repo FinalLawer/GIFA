@@ -699,6 +699,27 @@ function fmt(sec) {
 
 /* -------------------------------------------------------------------- UI */
 
+/* 字幕提到「清怪」时自动暂停。
+ *
+ * 攻略里说「清怪」是要开打了，先把视频停住看完再动手。
+ * 「清完怪」「清完小怪」是打完之后才说的，不能暂停 ——
+ * 所以先排掉含「清完」的，再判断「清怪」。
+ * 同一句字幕会反复推送，记住上次触发的那句避免反复暂停。
+ * 暂停后不自动恢复，用户自己点播放。 */
+let lastPauseText = '';
+function pauseOnClearNotice(text) {
+  const s = state.boot && state.boot.settings;
+  if (!s || !s.subtitlePauseOnClear) return;
+  const line = String(text || '');
+  if (/清完/.test(line)) return;
+  if (!/清怪/.test(line)) return;
+  if (line === lastPauseText) return;
+  if (!state.video || !state.video.playing) return;
+  lastPauseText = line;
+  sendPlayer({ cmd: 'pause' });
+  toast('字幕提到「清怪」，已暂停', 2600);
+}
+
 function wireUi() {
   const loadInput = () => loadVideo($('urlInput').value, undefined, true);
   $('btnLoad').addEventListener('click', loadInput);
@@ -727,6 +748,12 @@ function wireUi() {
   $('btnSpeed').addEventListener('click', () => window.api.action('cycle-speed'));
   window.api.onNotice((text) => {
     if (text) toast(text);
+  });
+  /* 主进程把当前这句字幕推过来。这里只做「清怪自动暂停」一件事，
+   * 方位判断和雷达交给主进程那一侧处理。 */
+  window.api.onCompassText((p) => {
+    if (!p || !p.text) return;
+    pauseOnClearNotice(p.text);
   });
   window.api.onPlaybackState((next) => {
     if (!next) return;

@@ -454,6 +454,10 @@ const DEFAULT_SETTINGS = {
   subtitleHideOnPause: false,
   // 自动点开播放器字幕按钮
   subtitleAutoOpen: true,
+  /* 字幕提到「清怪」时自动暂停。
+   * 攻略里说「清怪」是要开打了，先把视频停住看完再动手。
+   * 「清完怪」这类是打完之后的描述，不触发。 */
+  subtitlePauseOnClear: false,
   // 字幕位置：bottom / top
   subtitlePos: 'bottom',
   /* 转向提醒：字幕里出现「左转/右转/往东」等词时，

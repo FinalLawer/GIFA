@@ -442,6 +442,7 @@ function fillSettings(settings) {
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
   $('setSubtitle').checked = !!settings.enableSubtitleSprite;
   $('setSubHideOnPause').checked = settings.subtitleHideOnPause === true;
+  $('setSubPauseOnClear').checked = settings.subtitlePauseOnClear === true;
   $('setTurnReminder').checked = !!settings.enableTurnReminder;
   $('setOverlayRadar').checked = settings.overlayRadar === true;
   $('setAlertEnabled').checked = !!settings.alertEnabled;
@@ -492,6 +493,11 @@ function wireSettings() {
     const on = event.target.checked;
     state.boot.settings.subtitleHideOnPause = on;
     window.api.save({ subtitleHideOnPause: on });
+  });
+  $('setSubPauseOnClear').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.subtitlePauseOnClear = on;
+    window.api.save({ subtitlePauseOnClear: on });
   });
   $('setTurnReminder').addEventListener('change', (event) => {
     const on = event.target.checked;
