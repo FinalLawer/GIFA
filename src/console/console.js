@@ -440,6 +440,11 @@ function fillSettings(settings) {
   renderGamepadDevices(settings);
   $('setImmersion').checked = state.immersion;
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
+  $('setDanmaku').checked = !!settings.enableDanmakuProjection;
+  $('setDmOpacity').value = String(settings.danmakuOpacity ?? 80);
+  $('dmOpacityVal').textContent = String(settings.danmakuOpacity ?? 80);
+  $('setDmScale').value = String(settings.danmakuScale ?? 100);
+  $('dmScaleVal').textContent = String(settings.danmakuScale ?? 100);
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -478,6 +483,21 @@ function wireSettings() {
     state.boot.settings.hoverFadeEnabled = enabled;
     window.api.save({ hoverFadeEnabled: enabled });
   });
+  $('setDanmaku').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.enableDanmakuProjection = on;
+    window.api.save({ enableDanmakuProjection: on });
+  });
+  const dmRange = (id, key, valId, suffix = '') => {
+    $(id).addEventListener('input', (event) => {
+      const v = Number(event.target.value);
+      $(valId).textContent = v + suffix;
+      state.boot.settings[key] = v;
+      window.api.save({ [key]: v });
+    });
+  };
+  dmRange('setDmOpacity', 'danmakuOpacity', 'dmOpacityVal');
+  dmRange('setDmScale', 'danmakuScale', 'dmScaleVal');
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);
     if (!HOLD_RATES.includes(holdRate)) return;

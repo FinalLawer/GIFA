@@ -440,7 +440,26 @@ const DEFAULT_SETTINGS = {
     y: null
   },
   // 手柄：L3 按住弹八方向圆盘，右摇杆选动作。结构与出厂值都在 gamepad-config.js
-  gamepad: DEFAULT_GAMEPAD
+  gamepad: DEFAULT_GAMEPAD,
+  /* 全屏弹幕投影：把弹幕画到整个屏幕上，不挤在浮窗里。
+   * 数据来自 B 站官方弹幕接口（按 cid 拉），不是从播放器 DOM 里抠。 */
+  enableDanmakuProjection: false,
+  // 弹幕占据屏幕的百分比（从顶部算）
+  danmakuArea: 50,
+  // 不透明度 0~100
+  danmakuOpacity: 80,
+  // 字号缩放百分比
+  danmakuScale: 100,
+  // 滚动速度，越大越快
+  danmakuSpeed: 50,
+  // 字重 400~900
+  danmakuWeight: 700,
+  // 同屏上限，防止太密
+  danmakuMax: 60,
+  // 四向黑色描边
+  danmakuStroke: true,
+  // 隐藏播放器原生弹幕，避免两套同时出现
+  danmakuHideNative: true
 };
 
 /**
@@ -931,6 +950,341 @@ function syncHoverFade() {
   if (immersion && settings.hoverFadeEnabled) hoverTimer = setInterval(updateHoverFade, 60);
 }
 
+function danmakuBounds() {
+  const d = screen.getPrimaryDisplay();
+  return { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height };
+}
+
+function createDanmakuWindow() {
+  if (danmakuWin && !danmakuWin.isDestroyed()) return danmakuWin;
+
+  danmakuWin = new BrowserWindow({
+    ...danmakuBounds(),
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    title: 'GIFA 弹幕层',
+    webPreferences: {
+      preload: path.join(__dirname, 'danmaku', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 弹幕窗同理：空闲时让它被节流，真正需要时由主进程唤醒
+      backgroundThrottling: false
+    }
+  });
+
+  // 层级刻意比视频浮窗低一档：浮窗用 'screen-saver'，弹幕层用 'floating'。
+  // 这样弹幕飘过视频画面时会被浮窗挡住 —— 小地图上的红绿箭头始终看得见，
+  // 视觉上就是「弹幕在箭头下面」。若也用 screen-saver，两者同级，
+  // 谁后显示谁在上面，弹幕就会盖住方位标记。
+  danmakuWin.setAlwaysOnTop(true, 'floating');
+  danmakuWin.setIgnoreMouseEvents(true, { forward: true });
+
+  danmakuWin.on('closed', () => {
+    danmakuWin = null;
+  });
+
+  danmakuWin.loadFile(path.join(__dirname, 'danmaku', 'index.html'));
+
+  danmakuWin.webContents.on('did-finish-load', () => {
+    if (!danmakuWin || danmakuWin.isDestroyed()) return;
+    danmakuWin.setBounds(danmakuBounds());
+    pushDanmakuConfig();
+    raiseFloatAboveDanmaku();
+  });
+
+  return danmakuWin;
+}
+
+function refitDanmakuWindow() {
+  if (!danmakuWin || danmakuWin.isDestroyed()) return;
+  try {
+    danmakuWin.setBounds(danmakuBounds());
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+/**
+ * 方位箭头层的「挖空圆」，坐标换算到弹幕窗口的局部坐标系。
+ * 箭头层是独立窗口，位置/半径都存在 settings.bearing 里；
+ * 弹幕窗口铺满主屏，所以 local = 屏幕坐标 − 窗口原点。
+ */
+function bearingHole() {
+  if (!settings.bearing || !settings.bearing.enabled) return null;
+  if (!win || win.isDestroyed()) return null;
+
+  const cx = Number(settings.bearing.x);
+  const cy = Number(settings.bearing.y);
+  const r = Number(settings.bearing.radius);
+  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(r)) return null;
+
+  let bounds = null;
+  try {
+    bounds = danmakuWin && !danmakuWin.isDestroyed() ? danmakuWin.getBounds() : danmakuBounds();
+  } catch {
+    return null;
+  }
+  if (!bounds) return null;
+
+  return {
+    // 半径留 1.25 倍余量：箭头层的窗口比箭头本身大一圈
+    cx: Math.round(cx - bounds.x),
+    cy: Math.round(cy - bounds.y),
+    r: Math.round(r * 1.25)
+  };
+}
+
+/** 把当前外观配置推给弹幕窗口（实时生效，不重建窗口） */
+function pushDanmakuConfig() {
+  if (!danmakuWin || danmakuWin.isDestroyed()) return;
+  const cfg = {
+    area: settings.danmakuArea,
+    opacity: settings.danmakuOpacity,
+    scale: settings.danmakuScale,
+    speed: settings.danmakuSpeed,
+    weight: settings.danmakuWeight,
+    max: settings.danmakuMax,
+    stroke: settings.danmakuStroke,
+    // 方位箭头那一圈挖空：弹幕在那里直接不渲染，
+    // 比跟窗口抢 z-order 更可靠（Windows 上置顶窗口的层级很难稳定控制）
+    hole: bearingHole()
+  };
+  try {
+    danmakuWin.webContents.send('danmaku:config', cfg);
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+/** 清空弹幕窗里现有的全部弹幕（换片 / 拖进度条时用） */
+function resetDanmakuWindow() {
+  if (!danmakuWin || danmakuWin.isDestroyed()) return;
+  try {
+    danmakuWin.webContents.send('danmaku:reset', {});
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+/** 清空并隐藏弹幕层 */
+function hideDanmaku() {
+  if (!danmakuWin || danmakuWin.isDestroyed()) return;
+  try {
+    danmakuWin.webContents.send('danmaku:reset', {});
+    danmakuWin.hide();
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function destroyDanmakuWindow() {
+  if (!danmakuWin || danmakuWin.isDestroyed()) return;
+  danmakuWin.destroy();
+  danmakuWin = null;
+}
+
+function decodeXmlText(str) {
+  return String(str)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function colorHex(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '#ffffff';
+  return '#' + (v & 0xffffff).toString(16).padStart(6, '0');
+}
+
+async function fetchDanmakuList(cid) {
+  if (!cid) return [];
+  if (danmakuCid === cid && danmakuList.length) return danmakuList;
+  if (danmakuLoading === cid) return danmakuList;
+
+  danmakuLoading = cid;
+  try {
+    const res = await biliFetch(`https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`, {
+      Accept: 'application/xml,text/xml,*/*'
+    });
+    const xml = await res.text();
+    const out = [];
+    const re = /<d\s+p="([^"]*)"[^>]*>([\s\S]*?)<\/d>/g;
+    let m;
+    while ((m = re.exec(xml))) {
+      const parts = m[1].split(',');
+      const sec = Number(parts[0]);
+      if (!Number.isFinite(sec)) continue;
+      const text = decodeXmlText(m[2]).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      out.push({
+        t: Math.round(sec * 1000),
+        text,
+        color: colorHex(parts[3]),
+        idx: out.length
+      });
+    }
+    out.sort((a, b) => a.t - b.t);
+    out.forEach((d, i) => {
+      d.idx = i;
+    });
+    danmakuList = out;
+    danmakuCid = cid;
+    if (danmakuRetryCid === cid) {
+      danmakuRetryCid = 0;
+      danmakuRetried = 0;
+    }
+    danmakuNextTry = 0;
+    console.log('[danmaku]', { cid, count: out.length });
+    console.log('[danmaku] 已加载弹幕', out.length, '条（cid=' + cid + '）');
+    return danmakuList;
+  } catch (err) {
+    if (danmakuRetryCid !== cid) {
+      danmakuRetryCid = cid;
+      danmakuRetried = 0;
+    }
+    // 失败就自己再要几次：切到下一个分 P 时接口偶尔抽风，
+    // 以前这里直接 return []，列表一直是空的，
+    // 而 sendDanmakuSlice 开头就是「列表空就返回」——弹幕就永久没了。
+    if (danmakuRetried < 3) {
+      danmakuRetried += 1;
+      danmakuNextTry = Date.now() + 3000 * danmakuRetried;
+      console.log('[danmaku]', { cid, error: err.message, retry: danmakuRetried });
+      console.warn('[danmaku] 拉取失败，%d 秒后重试（第 %d 次）：%s',
+        3 * danmakuRetried, danmakuRetried, err.message);
+    } else {
+      console.log('[danmaku]', { cid, error: err.message, retry: 'gave-up' });
+      console.warn('[danmaku] 拉取失败，已放弃：', err.message);
+    }
+    return [];
+  } finally {
+    danmakuLoading = 0;
+  }
+}
+
+/**
+ * 按播放进度取「当前点前 1 秒 ~ 后 6 秒」的一小段发给弹幕窗。
+ * 绝不整包下发 —— 那正是井喷的另一种形式。
+ */
+function sendDanmakuSlice(t, seek, playing = true) {
+  if (!settings.enableDanmakuProjection) return;
+  if (!danmakuList.length) {
+    /* 列表是空的，不代表这个分 P 没弹幕 —— 也可能是刚才那一次请求失败了。
+     * 以前这里直接 return，于是永远等不到下一次请求，弹幕就永久消失。
+     * 这里按节制补拉：10 秒内最多试一次，失败重试逻辑在 fetchDanmakuList 里。 */
+    if (currentCid && Date.now() >= danmakuNextTry && danmakuLoading !== currentCid) {
+      danmakuNextTry = Date.now() + 10000;
+      console.log('[danmaku]', { cid: currentCid, refill: true });
+      fetchDanmakuList(currentCid);
+    }
+    return;
+  }
+
+  const now = Number(t);
+  if (!Number.isFinite(now) || now < 0) return;
+
+  // 非 seek 时，距离上次发送不到 2.5 秒就不重复发
+  if (!seek && danmakuSentAt >= 0 && Math.abs(now - danmakuSentAt) < 2.5) return;
+  danmakuSentAt = now;
+
+  const from = Math.max(0, now - 1);
+  const to = now + 6;
+  const items = danmakuList.filter((d) => d.t >= from * 1000 && d.t <= to * 1000);
+  if (!items.length && !seek) {
+    /* 这段没有弹幕可发。要区分两种情况：
+     *   · 视频这段本来就没人发弹幕（正常）
+     *   · 弹幕列表的时间和播放进度对不上（真的 bug，会一直空）
+     * 记一次「最近的一条弹幕还差多少秒」，一眼就能看出来。 */
+    if (Date.now() - lastGapLog > 10000) {
+      lastGapLog = Date.now();
+      let nearest = null;
+      for (const d of danmakuList) {
+        const dt = d.t / 1000 - now;
+        if (nearest === null || Math.abs(dt) < Math.abs(nearest)) nearest = dt;
+      }
+      console.log('[dmGap]', {
+        t: Math.round(now),
+        playing: !!playing,
+        list: danmakuList.length,
+        nearest: nearest === null ? null : Math.round(nearest * 10) / 10
+      });
+    }
+    return;
+  }
+
+  /* 换了分 P 就先让弹幕层清一次。
+   * 弹幕层用「列表下标」去重，不同分 P 的下标是各自从 0 开始的，
+   * 残留的旧下标会把新分 P 的弹幕全部当成「已显示」丢掉 ——
+   * 表现就是换 P 之后弹幕没了。 */
+  if (danmakuSliceCid !== currentCid) {
+    danmakuSliceCid = currentCid;
+    resetDanmakuWindow();
+  }
+
+  lastSliceAt = Date.now();
+
+  const w = createDanmakuWindow();
+  if (!w.isVisible()) {
+    w.showInactive();
+    // 刚显示出来的弹幕层会盖住所有置顶窗口，立刻把浮窗/箭头层顶回去
+    raiseFloatAboveDanmaku();
+  }
+  pushDanmakuConfig();
+
+  const send = () => {
+    if (!w || w.isDestroyed()) return;
+    w.webContents.send('danmaku:slice', { t: now, seek: !!seek, playing, items });
+  };
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send);
+  else send();
+}
+
+let lastRaiseLog = 0;
+function raiseFloatAboveDanmaku() {
+  let raised = false;
+
+  // 方位箭头层（红绿箭头）优先，它必须压在最上面
+  try {
+    if (overlayWin && !overlayWin.isDestroyed() && overlayWin.isVisible()) {
+      // 重新声明一次 topmost 会把窗口重新插入到置顶带最前面，
+      // 再 moveTop 兜底 —— Windows 上单靠 level 参数没用
+      overlayWin.setAlwaysOnTop(true, 'screen-saver');
+      overlayWin.moveTop();
+      raised = true;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    if (win && !win.isDestroyed()) {
+      win.setAlwaysOnTop(true, 'screen-saver');
+      win.moveTop();
+      raised = true;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // 每 10 秒最多打一条，方便确认这条链路真的执行了（不刷屏）
+  if (raised && Date.now() - lastRaiseLog > 10000) {
+    lastRaiseLog = Date.now();
+    console.log('[zorder] 已把浮窗/箭头层提到弹幕之上');
+  }
+}
+
+
 function sameWindowBounds(first, second) {
   return first.x === second.x && first.y === second.y && first.width === second.width && first.height === second.height;
 }
@@ -1123,6 +1477,21 @@ setInterval(() => {
 /* ------------------------------------------------------- 方位标记叠加层 */
 
 let overlayWin = null;
+// 全屏弹幕层
+let danmakuWin = null;
+let danmakuList = [];
+let danmakuCid = 0;
+let danmakuLoading = 0;
+let danmakuRetryCid = 0;
+let danmakuSentAt = -1;
+// 播放进度（弹幕按它切片下发）
+let lastDmTimeAt = 0;
+let lastDmT = 0;
+let lastDmPlaying = true;
+let lastSliceAt = 0;
+let watchPrevT = null;
+// 当前播放的 cid（分 P 会变），弹幕按它拉数据
+let currentCid = 0;
 let overlayReleaseTimer = null;
 let overlayPlacing = false;
 let lastBearing = null;
@@ -1953,6 +2322,47 @@ function registerIpc() {
     return dir;
   });
 
+  /* ---- 全屏弹幕投影 ---- */
+  ipcMain.on('danmaku:time', (_e, payload = {}) => {
+    lastDmTimeAt = Date.now();
+    if (Number.isFinite(Number(payload.t))) lastDmT = Number(payload.t);
+    lastDmPlaying = !!payload.playing;
+    if (!settings.enableDanmakuProjection) return;
+    const t = Number(payload.t);
+    if (!Number.isFinite(t)) return;
+
+    // 每次都把播放进度同步给弹幕窗（它用这个当本地时钟基准），
+    // 但片段只在需要时切，避免频繁下发
+    if (danmakuWin && !danmakuWin.isDestroyed()) {
+      danmakuWin.webContents.send('danmaku:time', { t, playing: payload.playing !== false });
+    }
+
+    if (payload.seek) {
+      resetDanmakuWindow();
+      danmakuSentAt = -1;
+      sendDanmakuSlice(t, true, payload.playing !== false);
+      return;
+    }
+    sendDanmakuSlice(t, false, payload.playing !== false);
+  });
+
+  ipcMain.on('danmaku:state', (_e, state) => {
+    if (!state || !state.slice) return;
+    const now = Date.now();
+    const idle = now - dmReportAt > 5000;
+    // 没有数据、或从来没报过，都要留痕；正常有数据的 5 秒最多一条
+    if (!state.items && !idle) return;
+    if (!idle && state.items > 0 && dmReportAt) return;
+    dmReportAt = now;
+    console.log('[dmRender]', {
+      items: state.items,
+      queued: state.queued,
+      shown: state.shown,
+      playing: !!state.playing,
+      winVisible: !!danmakuWin && !danmakuWin.isDestroyed() && danmakuWin.isVisible()
+    });
+  });
+
   ipcMain.handle('settings:save', (_e, patch = {}) => {
     const playbackChanged = updatePlaybackSettings(settings, patch);
     if (typeof patch.gamepadEnabled === 'boolean') setGamepadEnabled(patch.gamepadEnabled);
@@ -1962,6 +2372,25 @@ function registerIpc() {
       syncHoverFade();
       notifyFloatState();
     }
+    /* 弹幕开关：开了就建窗口并拉数据，关了立刻销毁，别留着空转 */
+    if (typeof patch.enableDanmakuProjection === 'boolean') {
+      settings.enableDanmakuProjection = patch.enableDanmakuProjection;
+      if (settings.enableDanmakuProjection) {
+        createDanmakuWindow();
+        pushDanmakuConfig();
+        if (currentCid) fetchDanmakuList(currentCid);
+      } else {
+        destroyDanmakuWindow();
+      }
+    }
+    // 弹幕样式：改了就下发，不用重建窗口
+    const dmStyleKeys = ['danmakuArea', 'danmakuOpacity', 'danmakuScale', 'danmakuSpeed',
+      'danmakuWeight', 'danmakuMax', 'danmakuStroke', 'danmakuHideNative'];
+    let dmStyleChanged = false;
+    for (const key of dmStyleKeys) {
+      if (patch[key] !== undefined) { settings[key] = patch[key]; dmStyleChanged = true; }
+    }
+    if (dmStyleChanged) pushDanmakuConfig();
     if (playbackChanged || patch.holdPlaybackRate !== undefined) publishPlaybackSettings();
     // 自动连播 / 手动切 P 只带 lastPart：页码和时间要一起刷新，
     // 否则启动器上的「上次看到」会一直停在第一次打开视频那一刻。
@@ -2169,6 +2598,18 @@ function registerIpc() {
     // 启动器可能正开着：让「上次看到」那一行立刻跟上，不用等下次启动
     broadcast('settings:changed', settings);
 
+    /* 弹幕按 cid 拉数据。同一视频切 P 时 cid 会变，旧列表必须丢掉重建，
+     * 否则新一 P 会放出上一 P 的弹幕。 */
+    const nextCid = pages.find((x) => x.page === p)?.cid || (info.ok ? info.cid : 0) || 0;
+    if (nextCid !== currentCid) {
+      currentCid = nextCid;
+      danmakuList = [];
+      danmakuCid = 0;
+      danmakuSentAt = -1;
+      resetDanmakuWindow();
+    }
+    if (currentCid && settings.enableDanmakuProjection) fetchDanmakuList(currentCid);
+
     return {
       ok: true,
       id,
@@ -2326,6 +2767,9 @@ if (!gotLock) {
     registerHotkeys();
     // Windows 手柄输入由独立子进程处理，关闭手柄快捷键时无需启动它。
     if (settings.gamepad.enabled) gamepad.start(handleGamepadFrame);
+
+    // 弹幕层：设置里开着就启动时建好，免得进游戏才发现没生效
+    if (settings.enableDanmakuProjection) createDanmakuWindow();
 
     // `--open BVxxx` 是从快捷方式直接带视频来的，那就顺手把浮窗也起来
     if (OPEN_ARG) createWindow();
