@@ -440,6 +440,9 @@ function fillSettings(settings) {
   renderGamepadDevices(settings);
   $('setImmersion').checked = state.immersion;
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
+  $('setSubtitle').checked = !!settings.enableSubtitleSprite;
+  $('setSubHideOnPause').checked = settings.subtitleHideOnPause === true;
+  $('setTurnReminder').checked = !!settings.enableTurnReminder;
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -477,6 +480,21 @@ function wireSettings() {
     const enabled = event.target.checked;
     state.boot.settings.hoverFadeEnabled = enabled;
     window.api.save({ hoverFadeEnabled: enabled });
+  });
+  $('setSubtitle').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.enableSubtitleSprite = on;
+    window.api.save({ enableSubtitleSprite: on });
+  });
+  $('setSubHideOnPause').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.subtitleHideOnPause = on;
+    window.api.save({ subtitleHideOnPause: on });
+  });
+  $('setTurnReminder').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.enableTurnReminder = on;
+    window.api.save({ enableTurnReminder: on });
   });
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);

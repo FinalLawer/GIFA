@@ -440,7 +440,28 @@ const DEFAULT_SETTINGS = {
     y: null
   },
   // 手柄：L3 按住弹八方向圆盘，右摇杆选动作。结构与出厂值都在 gamepad-config.js
-  gamepad: DEFAULT_GAMEPAD
+  gamepad: DEFAULT_GAMEPAD,
+  /* 底部字幕精灵：把视频字幕显示到屏幕底部。
+   * 字幕文本还能用来判方位（见雷达功能），这里只管显示。 */
+  enableSubtitleSprite: false,
+  // 优先用官方字幕接口（带精确时间戳）；关掉只走 DOM 抓取
+  subtitleUseApi: true,
+  // 隐藏播放器原生字幕，避免两套同时出现
+  subtitleHideNative: true,
+  // 同一时刻多行字幕合并显示；关掉只取最新一条
+  subtitleMergeOverlap: true,
+  // 暂停时隐藏字幕
+  subtitleHideOnPause: false,
+  // 自动点开播放器字幕按钮
+  subtitleAutoOpen: true,
+  // 字幕位置：bottom / top
+  subtitlePos: 'bottom',
+  /* 转向提醒：字幕里出现「左转/右转/往东」等词时，
+   * 在画面边缘弹一个大箭头。与字幕层共用同一个窗口。 */
+  enableTurnReminder: false,
+  // 分组开关：左右 / 上下 可分别启用
+  turnEnableLR: true,
+  turnEnableUD: true
 };
 
 /**
@@ -931,6 +952,335 @@ function syncHoverFade() {
   if (immersion && settings.hoverFadeEnabled) hoverTimer = setInterval(updateHoverFade, 60);
 }
 
+async function fetchSubtitleCues(bvid, cid, gen) {
+  if (!cid || !bvid) return [];
+  if (subtitleCid === cid && subtitleCues.length) return subtitleCues;
+  if (subtitleLoading === cid) return subtitleCues;
+  subtitleLoading = cid;
+  const myGen = gen === undefined ? subtitleGen : gen;
+  /** 只有代数没变才落地；返回 false 表示这是过期结果 */
+  const commit = (cues) => {
+    if (myGen !== subtitleGen) return false;
+    subtitleCues = cues;
+    subtitleCid = cid;
+    return true;
+  };
+  try {
+    const res = await biliFetch(
+      `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(bvid)}&cid=${cid}`
+    );
+    const json = await res.json();
+    const data = (json && json.data) || {};
+    const subs = data.subtitle && data.subtitle.subtitles;
+    if (!Array.isArray(subs) || !subs.length) {
+      // 分清两种「没有字幕」：没登录 vs 这个视频本来就没字幕轨
+      console.log('[subtitle]', { cid, count: 0, needLogin: !!data.need_login_subtitle });
+      console.log(
+        '[subtitle] 接口没有字幕轨（need_login_subtitle=%s），回退 DOM 抓取',
+        !!data.need_login_subtitle
+      );
+      return commit([]) ? [] : null;
+    }
+    // 优先中文正式轨，其次 AI 中文，最后任意含 zh 的
+    const pick =
+      subs.find((x) => /^zh(-Hans)?$/i.test(x.lan || '')) ||
+      subs.find((x) => /^ai-zh/i.test(x.lan || '')) ||
+      subs.find((x) => /zh/i.test(x.lan || ''));
+    if (!pick || !pick.subtitle_url) {
+      return commit([]) ? [] : null;
+    }
+    let url = String(pick.subtitle_url);
+    if (url.startsWith('//')) url = 'https:' + url;
+    const r2 = await biliFetch(url, { Accept: 'application/json' });
+    const doc = await r2.json();
+    const body = doc && Array.isArray(doc.body) ? doc.body : [];
+    const cues = [];
+    for (const row of body) {
+      if (!row) continue;
+      const from = Number(row.from);
+      const to = Number(row.to);
+      const text = String(row.content || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || !text) continue;
+      cues.push({ from, to, text: text.slice(0, 500) });
+    }
+    cues.sort((a, b) => a.from - b.from);
+    if (!commit(cues)) return null; // 换片了，这个结果作废
+    console.log('[subtitle]', { cid, count: cues.length, lan: pick.lan });
+    console.log('[subtitle] 已加载字幕 %d 条（cid=%s，轨=%s）', cues.length, cid, pick.lan);
+    return cues;
+  } catch (err) {
+    console.log('[subtitle]', { cid, error: err.message });
+    console.warn('[subtitle] 拉取失败，回退到 DOM 抓取：', err.message);
+    return commit([]) ? [] : null;
+  } finally {
+    subtitleLoading = 0;
+  }
+}
+
+/**
+ * 取某一时刻的全部字幕。
+ * 这里就是「重叠字幕合并」：把所有 from <= t < to 的 cue 都取出来，
+ * 去重后按顺序拼接 —— 同时有两行对白时两行都会显示。
+ */
+function subtitleAt(t) {
+  const out = [];
+  for (const c of subtitleCues) {
+    if (c.from > t) break; // 已按 from 升序，后面的更晚
+    if (t < c.to) out.push(c.text);
+  }
+  // 合并：同一时刻的多行对白拼成一行；不合并：只取最新一条
+  if (settings.subtitleMergeOverlap === false) return out[out.length - 1].slice(0, 500);
+  return [...new Set(out)].join(' ').slice(0, 500);
+}
+
+function subtitleBounds() {
+  // 用 bounds 而不是 workArea：字幕层要覆盖整个屏幕，包括任务栏那一条，
+  // 否则某些布局下底部会被裁掉。
+  const d = screen.getPrimaryDisplay();
+  return { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height };
+}
+
+function createSubtitleWindow() {
+  if (subtitleWin && !subtitleWin.isDestroyed()) return subtitleWin;
+  console.log('[subWin]', { create: true });
+
+  subtitleWin = new BrowserWindow({
+    ...subtitleBounds(),
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    title: 'GIFA 字幕层',
+    webPreferences: {
+      preload: path.join(__dirname, 'subtitle', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 字幕窗只在有文本时才有事做：允许 Chromium 在不可见/空闲时降频，
+      // 避免一个全屏透明层空转着把 CPU 啃掉（玩游戏时尤其明显）
+      backgroundThrottling: true
+    }
+  });
+
+  subtitleWin.setAlwaysOnTop(true, 'screen-saver');
+  // 整窗穿透：字幕层永远不接收鼠标，剪贴板/游戏点击都落在下面的窗口
+  subtitleWin.setIgnoreMouseEvents(true, { forward: true });
+
+  subtitleWin.on('closed', () => {
+    subtitleWin = null;
+  });
+
+  subtitleWin.loadFile(path.join(__dirname, 'subtitle', 'index.html'));
+
+  // 换分辨率 / 缩放 / 切主屏时重新铺满
+  subtitleWin.webContents.on('did-finish-load', () => {
+    if (!subtitleWin || subtitleWin.isDestroyed()) return;
+    subtitleWin.setBounds(subtitleBounds());
+    pushSubtitleConfig();
+    pushTurnConfig();
+  });
+
+  return subtitleWin;
+}
+
+/** 显示器参数变化时把字幕层重新铺满（外接屏拔插、改分辨率都会触发） */
+function refitSubtitleWindow() {
+  if (!subtitleWin || subtitleWin.isDestroyed()) return;
+  try {
+    subtitleWin.setBounds(subtitleBounds());
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+/** 显示一句字幕；text 为空表示立刻隐藏 */
+function showSubtitleText(text) {
+  if (!settings.enableSubtitleSprite) return;
+  if (!text) {
+    hideSubtitleText();
+    return;
+  }
+  pushSubtitleToWindow(text);
+}
+
+/**
+ * 把文本推给字幕窗口并确保它可见（不判断开关）。
+ * 抽出来是为了让调试自检也能直接调用，不被 settings 拦住。
+ */
+function pushSubtitleToWindow(text) {
+  const w = createSubtitleWindow();
+  pushSubtitleConfig();
+  const send = () => {
+    if (!w || w.isDestroyed()) return;
+    // 先补外观配置再发文本：窗口刚建好时 did-finish-load 之前的推送会丢
+    w.webContents.send('subtitle:config', subtitleStyleSnapshot());
+    w.webContents.send('subtitle:text', { text: String(text) });
+  };
+
+  // 关键：必须 showInactive 让窗口真正显示。之前只在「不可见」时调，
+  // 而窗口创建时 show:false，did-finish-load 早于这里，容易出现窗口一直隐藏。
+  if (!w.isVisible()) w.showInactive();
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send);
+  else send();
+}
+
+function hideSubtitleText() {
+  if (!subtitleWin || subtitleWin.isDestroyed()) return;
+  try {
+    subtitleWin.webContents.send('subtitle:text', { off: true });
+    subtitleWin.hide();
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function destroySubtitleWindow() {
+  if (!subtitleWin || subtitleWin.isDestroyed()) return;
+  subtitleWin.destroy();
+  subtitleWin = null;
+}
+
+/** 校验并写入一组字幕外观字段（非法值直接忽略，保留原值） */
+function applySubtitleStylePatch(patch = {}) {
+  const clamp = (v, min, max, fb) =>
+    Number.isFinite(Number(v)) ? Math.min(max, Math.max(min, Math.round(Number(v)))) : fb;
+
+  if (patch.scale !== undefined)
+    settings.subtitleScale = clamp(patch.scale, 50, 200, settings.subtitleScale);
+  if (patch.offset !== undefined)
+    settings.subtitleOffset = clamp(patch.offset, 10, 500, settings.subtitleOffset);
+  if (patch.bgOpacity !== undefined)
+    settings.subtitleBgOpacity = clamp(patch.bgOpacity, 0, 100, settings.subtitleBgOpacity);
+
+  if (typeof patch.color === 'string' && /^#[0-9a-f]{6}$/i.test(patch.color)) {
+    settings.subtitleColor = patch.color.toLowerCase();
+  }
+  if (typeof patch.stroke === 'string' && SUB_STROKE_LIST.includes(patch.stroke)) {
+    settings.subtitleStroke = patch.stroke;
+  }
+  if (typeof patch.pos === 'string' && SUB_POS_LIST.includes(patch.pos)) {
+    settings.subtitlePos = patch.pos;
+  }
+  if (patch.keepRatio !== undefined) settings.subtitleKeepRatio = !!patch.keepRatio;
+  if (patch.fade !== undefined) settings.subtitleFade = !!patch.fade;
+  if (patch.hold !== undefined) settings.subtitleHold = clamp(patch.hold, 1, 10, settings.subtitleHold);
+  if (patch.maxWidth !== undefined)
+    settings.subtitleMaxWidth = clamp(patch.maxWidth, 30, 100, settings.subtitleMaxWidth);
+  if (patch.weight !== undefined)
+    settings.subtitleWeight = clamp(patch.weight, 500, 900, settings.subtitleWeight);
+  if (patch.radius !== undefined)
+    settings.subtitleRadius = clamp(patch.radius, 0, 24, settings.subtitleRadius);
+}
+
+/** 当前字幕外观的快照，直接给字幕窗口用 */
+function subtitleStyleSnapshot() {
+  return {
+    scale: settings.subtitleScale,
+    color: settings.subtitleColor,
+    stroke: settings.subtitleStroke,
+    pos: settings.subtitlePos,
+    // hold 传 0：字幕窗不再按墙上时间自动隐藏，改由主进程按视频进度下发 off。
+    // 否则暂停时计时器照跑，一句没说完的字幕会被提前吃掉。
+    // 真正的停留时长 subtitleHold 由访客页的 ticker 使用，不经这里。
+    hold: 0,
+    offset: settings.subtitleOffset,
+    bgOpacity: settings.subtitleBgOpacity,
+    keepRatio: settings.subtitleKeepRatio,
+    fade: settings.subtitleFade,
+    maxWidth: settings.subtitleMaxWidth,
+    weight: settings.subtitleWeight,
+    radius: settings.subtitleRadius
+  };
+}
+
+/** 把外观推给字幕窗口；窗口还没建就跳过（下次显示时会带上最新配置） */
+function pushSubtitleConfig() {
+  if (!subtitleWin || subtitleWin.isDestroyed()) return;
+  try {
+    subtitleWin.webContents.send('subtitle:config', subtitleStyleSnapshot());
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function pushTurnConfig() {
+  if (!subtitleWin || subtitleWin.isDestroyed()) return;
+  try {
+    subtitleWin.webContents.send('turn:config', turnStyleSnapshot());
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function pushTurnHint(hint) {
+  if (!hint && (!subtitleWin || subtitleWin.isDestroyed())) return;
+
+  const w = createSubtitleWindow();
+  // 剧情期间不弹转向箭头（每句字幕都会触发，否则字幕层刚藏就被顶出来）
+  if (hint && !w.isVisible() && !storyHidden) w.showInactive();
+  if (hint) {
+    w.webContents.send('subtitle:config', subtitleStyleSnapshot());
+    w.webContents.send('turn:config', turnStyleSnapshot());
+  }
+
+  const send = () => {
+    if (!w || w.isDestroyed()) return;
+    w.webContents.send('turn:hint', hint || { off: true });
+    console.log('[turn] 主进程 → 字幕层:', hint ? hint.dir : 'off', '| visible=', w.isVisible());
+  };
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send);
+  else send();
+}
+
+/**
+ * 转向提示：把方向塞给字幕层里的大箭头；null 表示收起。
+ *
+ * 两个容易踩的点：
+ *  1) 字幕条关掉时窗口可能还没建 —— 要按需创建；
+ *  2) 窗口建好但被 hide 了（字幕 3 秒淡出后不会 hide，但关开关会），
+ *     这里必须主动 showInactive，否则箭头画在隐藏窗口里，等于没显示。
+ */
+function applyTurnStylePatch(patch = {}) {
+  const clamp = (v, min, max, fb) =>
+    Number.isFinite(Number(v)) ? Math.min(max, Math.max(min, Math.round(Number(v)))) : fb;
+
+  if (patch.offset !== undefined) settings.turnOffset = clamp(patch.offset, 10, 400, settings.turnOffset);
+  if (patch.scale !== undefined) settings.turnScale = clamp(patch.scale, 60, 200, settings.turnScale);
+  if (patch.duration !== undefined)
+    settings.turnDuration = clamp(patch.duration, 1, 10, settings.turnDuration);
+  if (patch.opacity !== undefined)
+    settings.turnOpacity = clamp(patch.opacity, 20, 100, settings.turnOpacity);
+  if (typeof patch.color === 'string' && /^#[0-9a-f]{6}$/i.test(patch.color)) {
+    settings.turnColor = patch.color.toLowerCase();
+  }
+  if (patch.posY !== undefined) settings.turnPosY = clamp(patch.posY, 5, 95, settings.turnPosY);
+  if (patch.posX !== undefined) settings.turnPosX = clamp(patch.posX, 5, 95, settings.turnPosX);
+  // 分组开关：左右 / 上下 可以分开启用
+  if (patch.enableLR !== undefined) settings.turnEnableLR = !!patch.enableLR;
+  if (patch.enableUD !== undefined) settings.turnEnableUD = !!patch.enableUD;
+}
+
+function turnStyleSnapshot() {
+  return {
+    offset: settings.turnOffset,
+    scale: settings.turnScale,
+    duration: settings.turnDuration,
+    opacity: settings.turnOpacity,
+    color: settings.turnColor,
+    posY: settings.turnPosY,
+    posX: settings.turnPosX
+  };
+}
+
 function sameWindowBounds(first, second) {
   return first.x === second.x && first.y === second.y && first.width === second.width && first.height === second.height;
 }
@@ -1123,6 +1473,15 @@ setInterval(() => {
 /* ------------------------------------------------------- 方位标记叠加层 */
 
 let overlayWin = null;
+// 底部字幕层
+let subtitleWin = null;
+let subtitleCues = [];
+let subtitleCid = 0;
+let subtitleGen = 0;
+let lastApiSubtitleText = '';
+let lastDomSubtitleText = '';
+// 当前分 P 的 cid，字幕按它拉官方轨
+let currentCid = 0;
 let overlayReleaseTimer = null;
 let overlayPlacing = false;
 let lastBearing = null;
@@ -1953,6 +2312,114 @@ function registerIpc() {
     return dir;
   });
 
+  /* ---- 底部字幕精灵 ---- */
+  ipcMain.on('subtitle:time', (_e, payload = {}) => {
+    if (!settings.enableSubtitleSprite) return;
+    if (!subtitleCues.length) return; // 没有接口字幕，走 DOM 抓取那条路
+    // 暂停时按开关决定要不要清屏
+    if (payload && payload.paused && settings.subtitleHideOnPause) {
+      if (lastApiSubtitleText) {
+        lastApiSubtitleText = '';
+        hideSubtitleText();
+      }
+      return;
+    }
+    const t = Number(payload && payload.t);
+    if (!Number.isFinite(t)) return;
+    const text = subtitleAt(t);
+    if (text === lastApiSubtitleText) {
+      /* 同一句字幕还在屏幕上：定期续期罗盘。
+       *
+       * 接口字幕只在**文本变化**时才推送，文本不变就再也没有消息。
+       * 而叠加层的光晕 3.2 秒就淡出 —— 用户看到字、抬头看小地图，
+       * 光早就没了，所以一直觉得「根本没亮」。
+       * 这里由主进程按帧驱动续期，不依赖文本变化。 */
+      if (text && Date.now() - lastCompassKeepAlive > 1000) {
+        lastCompassKeepAlive = Date.now();
+        cueSubtitleText(text);
+      }
+      return;
+    }
+    lastApiSubtitleText = text;
+    lastCompassKeepAlive = Date.now();
+    if (text) {
+      showSubtitleText(text);
+      // 接口字幕也要判方位，否则雷达在这种模式下永远不亮
+      cueSubtitleText(text);
+    } else {
+      hideSubtitleText();
+    }
+  });
+
+  ipcMain.on('subtitle:update', (_e, payload = {}) => {
+    if (!settings.enableSubtitleSprite) {
+      hideSubtitleText();
+      return;
+    }
+    if (payload && payload.off) {
+      hideSubtitleText();
+      return;
+    }
+    const text = String((payload && payload.text) || '').trim();
+    if (!text) return;
+    if (text !== lastDomSubtitleText) cueSubtitleText(text);
+    lastDomSubtitleText = text;
+    showSubtitleText(text);
+  });
+
+  ipcMain.on('subtitle:idle', () => {
+    if (!subtitleWin || subtitleWin.isDestroyed()) return;
+    if (!settings.enableSubtitleSprite && !settings.enableTurnReminder) return;
+    // 窗口 hide 后仍保留实例，下次有文本时 showInactive 即可，不用重建
+    if (subtitleWin.isVisible()) subtitleWin.hide();
+  });
+
+  ipcMain.handle('subtitle:status', () => {
+    const api = subtitleCues.length > 0;
+    return {
+      mode: api ? 'api' : lastDomSubtitleText ? 'dom' : 'none',
+      count: subtitleCues.length,
+      cid: subtitleCid,
+      // 官方字幕模式取主进程查表的结果，DOM 模式取访客页推上来的最后一句
+      lastText: api ? lastApiSubtitleText : lastDomSubtitleText,
+      enabled: !!settings.enableSubtitleSprite,
+      apiEnabled: settings.subtitleUseApi !== false
+    };
+  });
+
+  ipcMain.handle('subtitle:refetch', async () => {
+    if (!settings.subtitleUseApi) return { ok: false, reason: 'api-off' };
+    const bvid = settings.lastVideoId;
+    const cid = currentCid;
+    if (!bvid || !cid) return { ok: false, reason: 'no-video' };
+    subtitleCid = 0;
+    subtitleCues = [];
+    subtitleGen += 1;
+    const gen = subtitleGen;
+    lastApiSubtitleText = '';
+    const cues = await fetchSubtitleCues(bvid, cid, gen);
+    if (cues === null || gen !== subtitleGen) return { ok: false, reason: 'stale' };
+    if (win && !win.isDestroyed()) {
+      sendTo(win, 'subtitle:api', { on: cues.length > 0, count: cues.length });
+    }
+    return { ok: true, count: cues.length };
+  });
+
+  /* ---- 转向提醒 ---- */
+  ipcMain.on('turn:update', (_e, payload = {}) => {
+    if (!settings.enableTurnReminder) return;
+    // 分组开关（前端已过滤一次，这里再兜一道，防止旧配置/竞态漏过来）
+    if (payload && (payload.dir === 'left' || payload.dir === 'right') && !settings.turnEnableLR) return;
+    if (payload && (payload.dir === 'up' || payload.dir === 'down') && !settings.turnEnableUD) return;
+    if (payload && payload.off) {
+      pushTurnHint(null);
+      return;
+    }
+    const dir = String(payload.dir || '');
+    if (!dir) return;
+    pushTurnHint({ dir, label: String(payload.label || ''), text: String(payload.text || '') });
+  });
+
   ipcMain.handle('settings:save', (_e, patch = {}) => {
     const playbackChanged = updatePlaybackSettings(settings, patch);
     if (typeof patch.gamepadEnabled === 'boolean') setGamepadEnabled(patch.gamepadEnabled);
@@ -1961,6 +2428,44 @@ function registerIpc() {
       settings.hoverFadeEnabled = patch.hoverFadeEnabled;
       syncHoverFade();
       notifyFloatState();
+    }
+    /* 字幕开关：开了建窗口并拉字幕轨，关了销毁 */
+    if (typeof patch.enableSubtitleSprite === 'boolean') {
+      settings.enableSubtitleSprite = patch.enableSubtitleSprite;
+      if (settings.enableSubtitleSprite) {
+        createSubtitleWindow();
+        pushSubtitleConfig();
+        // 视频已经载入后才打开开关：补拉一次官方字幕轨
+        if (settings.subtitleUseApi && settings.lastVideoId && currentCid) {
+          subtitleGen += 1;
+          fetchSubtitleCues(settings.lastVideoId, currentCid, subtitleGen);
+        }
+      } else {
+        hideSubtitleText();
+        destroySubtitleWindow();
+      }
+    }
+    // 字幕样式与开关：改了就下发
+    const subKeys = ['subtitleUseApi', 'subtitleHideNative', 'subtitleMergeOverlap',
+      'subtitleHideOnPause', 'subtitleAutoOpen'];
+    let subChanged = false;
+    for (const key of subKeys) {
+      if (typeof patch[key] === 'boolean') { settings[key] = patch[key]; subChanged = true; }
+    }
+    if (patch.subtitle && typeof patch.subtitle === 'object') {
+      if (patch.subtitle.pos !== undefined) settings.subtitlePos = patch.subtitle.pos;
+      subChanged = true;
+    }
+    if (subChanged) pushSubtitleConfig();
+    /* 转向提醒：与字幕共用窗口，任一个开着就要有窗口 */
+    if (typeof patch.enableTurnReminder === 'boolean') {
+      settings.enableTurnReminder = patch.enableTurnReminder;
+      if (settings.enableTurnReminder) createSubtitleWindow();
+      else if (!settings.enableSubtitleSprite) destroySubtitleWindow();
+      pushTurnConfig();
+    }
+    for (const key of ['turnEnableLR', 'turnEnableUD']) {
+      if (typeof patch[key] === 'boolean') { settings[key] = patch[key]; pushTurnConfig(); }
     }
     if (playbackChanged || patch.holdPlaybackRate !== undefined) publishPlaybackSettings();
     // 自动连播 / 手动切 P 只带 lastPart：页码和时间要一起刷新，
@@ -2169,6 +2674,21 @@ function registerIpc() {
     // 启动器可能正开着：让「上次看到」那一行立刻跟上，不用等下次启动
     broadcast('settings:changed', settings);
 
+    /* 字幕按 cid 拉官方轨。切 P 时 cid 会变，旧字幕必须丢掉重建，
+     * 否则新一 P 会弹出上一 P 的字幕。 */
+    const nextCid = pages.find((x) => x.page === p)?.cid || (info.ok ? info.cid : 0) || 0;
+    if (nextCid !== currentCid) {
+      currentCid = nextCid;
+      subtitleCues = [];
+      subtitleCid = 0;
+      lastApiSubtitleText = '';
+      lastDomSubtitleText = '';
+    }
+    if (currentCid && settings.enableSubtitleSprite && settings.subtitleUseApi) {
+      subtitleGen += 1;
+      fetchSubtitleCues(id, currentCid, subtitleGen);
+    }
+
     return {
       ok: true,
       id,
@@ -2326,6 +2846,9 @@ if (!gotLock) {
     registerHotkeys();
     // Windows 手柄输入由独立子进程处理，关闭手柄快捷键时无需启动它。
     if (settings.gamepad.enabled) gamepad.start(handleGamepadFrame);
+
+    // 字幕层：设置里开着就启动时建好
+    if (settings.enableSubtitleSprite) createSubtitleWindow();
 
     // `--open BVxxx` 是从快捷方式直接带视频来的，那就顺手把浮窗也起来
     if (OPEN_ARG) createWindow();
