@@ -461,7 +461,14 @@ const DEFAULT_SETTINGS = {
   enableTurnReminder: false,
   // 分组开关：左右 / 上下 可分别启用
   turnEnableLR: true,
-  turnEnableUD: true
+  turnEnableUD: true,
+  /* 罗盘雷达：方位叠加层上多画一圈四轴方位。字幕出现方位词时点亮 */
+  overlayRadar: false,
+  /* 放大提醒：方位点亮时把游戏小地图那块抓一帧放大显示 */
+  alertEnabled: false,
+  alertSize: 260,
+  alertX: null,
+  alertY: null
 };
 
 /**
@@ -1281,6 +1288,238 @@ function turnStyleSnapshot() {
   };
 }
 
+function pushRadarConfig() {
+  if (!overlayWin || overlayWin.isDestroyed()) return;
+  const b = settings.bearing || {};
+  /* 只要「开过箭头 + 有可用布局」就挂雷达。
+   * 上游改成命名布局后不再有 rois / roiBy：是否已标定看当前布局是否已经对准圆心。 */
+  const layout = activeBearingLayout(b);
+  const hasRois = !!(layout && layout.roi && Array.isArray(b.layouts) && b.layouts.length > 0);
+  const visible = !!b.enabled && hasRois;
+  const payload = {
+    radius: Math.max(60, Number(b.radius) || 110),
+    visible,
+    // 高亮时序：雷达圈和放大提醒窗必须同亮同灭
+    hold: CUE_HOLD_MS,
+    fade: CUE_FADE_MS
+  };
+  try {
+    overlayWin.webContents.send('radar:config', payload);
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function cueSubtitleText(text) {
+  const t = String(text || '');
+  if (!t) return;
+  lastSubtitleTextAt = Date.now();
+  if (!win || win.isDestroyed()) return;
+  // 记一句：能区分「主进程根本没发」和「发了但浮窗没解析」
+  const now = Date.now();
+  if (now - lastCueTextAt > 3000) {
+    lastCueTextAt = now;
+    const gap = lastPartSwitchAt ? Math.round((Date.now() - lastPartSwitchAt) / 100) / 10 : null;
+    console.log('[cueText]', { text: t.slice(0, 40), sincePart: gap });
+  }
+  try {
+    sendTo(win, 'compass-text', { text: t });
+  } catch (err) {
+    console.log('[cueText]', { error: String((err && err.message) || err) });
+  }
+}
+
+function alertSize() {
+  // 必须和叠加层里**实际画出来的圆环**对齐：
+  // radar.js 的 radius() 是「窗口短边的一半 × 0.86」，不是整个窗口。
+  // 按窗口尺寸裁会大出约 4%，看着就是「边框比画面大一圈」。
+  return Math.round(overlaySize() * 0.86);
+}
+
+function alertBounds() {
+  const size = alertSize();
+  // 默认放在主屏右侧居中：不挡游戏主体，余光能看到
+  let area = null;
+  try {
+    area = screen.getPrimaryDisplay().workArea;
+  } catch {
+    area = null;
+  }
+  if (!area) return { x: 40, y: 40, width: size, height: size };
+
+  const x = Number.isFinite(settings.alertX) ? settings.alertX : Math.round(area.x + area.width - size - 40);
+  const y = Number.isFinite(settings.alertY) ? settings.alertY : Math.round(area.y + (area.height - size) / 2);
+  return { x, y, width: size, height: size };
+}
+
+function createAlertWindow() {
+  if (alertWin && !alertWin.isDestroyed()) return alertWin;
+
+  alertWin = new BrowserWindow({
+    ...alertBounds(),
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    title: 'GIFA 放大提醒',
+    webPreferences: {
+      preload: path.join(__dirname, 'alert', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 窗口平时是隐藏的，但屏幕流必须继续跑 ——
+      // 否则每次点亮都要重新建流，第一帧空白半秒。
+      backgroundThrottling: false
+    }
+  });
+
+  alertWin.setAlwaysOnTop(true, 'screen-saver');
+  // 平时整窗穿透：提醒窗不能挡游戏点击，只有放置模式才接管鼠标
+  alertWin.setIgnoreMouseEvents(true, { forward: true });
+
+  alertWin.on('move', () => {
+    if (!alertWin || alertWin.isDestroyed()) return;
+    const b = alertWin.getBounds();
+    settings.alertX = Math.round(b.x);
+    settings.alertY = Math.round(b.y);
+    persist();
+  });
+
+  alertWin.on('closed', () => {
+    alertWin = null;
+    alertHideTimer = null;
+  });
+
+  alertWin.loadFile(path.join(__dirname, 'alert', 'index.html'));
+  alertWin.webContents.on('did-finish-load', () => {
+    if (!alertWin || alertWin.isDestroyed()) return;
+    alertWin.webContents.send('alert:placing', alertPlacing);
+    // 页面一就绪就把屏幕流建起来，等第一次点亮时画面已经在了
+    sendAlertStream();
+  });
+
+  return alertWin;
+}
+
+function setAlertPlacing(on) {
+  alertPlacing = !!on;
+  const w = alertPlacing ? createAlertWindow() : alertWin;
+  if (!w || w.isDestroyed()) return alertPlacing;
+  // 放置模式要能拖：放开鼠标接管，并让页面切成可拖动区域
+  w.setIgnoreMouseEvents(!alertPlacing, { forward: true });
+  // 无边框窗口靠 -webkit-app-region: drag 拖动，而 Windows 上
+  // 这一步需要窗口能被激活。提醒窗平时是 focusable:false（不能抢游戏焦点），
+  // 拖拽就会时好时坏 —— 放置期间临时放开，退出时立刻收回去。
+  try {
+    w.setFocusable(alertPlacing);
+  } catch {
+    /* 个别平台没有这个方法 */
+  }
+  if (alertPlacing && !w.isVisible() && !storyHidden) w.showInactive();
+  if (!w.webContents.isLoading()) w.webContents.send('alert:placing', alertPlacing);
+  return alertPlacing;
+}
+
+async function sendAlertStream() {
+  const w = alertWin;
+  if (!w || w.isDestroyed()) return;
+
+  let display = null;
+  try {
+    display = screen.getDisplayMatching(overlayBounds());
+  } catch {
+    display = null;
+  }
+  if (!display) return;
+
+  let sources = [];
+  try {
+    // 只要 sourceId，缩略图给 1×1 就够，几乎不花时间
+    sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
+  } catch (err) {
+    console.warn('[alert] 取屏幕源失败：', err && err.message);
+    return;
+  }
+  if (!sources || !sources.length) return;
+
+  const src = sources.find((x) => String(x.display_id) === String(display.id)) || sources[0];
+  const ring = alertSize();
+  const b = overlayBounds();
+  const cx = b.x + b.width / 2 - ring / 2;
+  const cy = b.y + b.height / 2 - ring / 2;
+
+  const payload = {
+    sourceId: src.id,
+    region: {
+      x: Math.round(cx - display.bounds.x),
+      y: Math.round(cy - display.bounds.y),
+      size: ring
+    },
+    screen: { width: display.size.width, height: display.size.height }
+  };
+
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', () => {
+    if (w && !w.isDestroyed()) w.webContents.send('alert:stream', payload);
+  });
+  else {
+    try {
+      w.webContents.send('alert:stream', payload);
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  }
+}
+
+function showAlertCue() {
+  if (!settings.alertEnabled) return;
+
+  /* 只记录，不改行为 —— 提醒窗是不是把罗盘拖卡了，还没有证据，
+   * 先让它照常亮，用日志看「提醒窗亮着」和「罗盘停摆」是否真的同步。 */
+  if (Date.now() - lastAlertAt > 10000) {
+    lastAlertAt = Date.now();
+    console.log('[alert]', { show: true, overlay: !!overlayWin && !overlayWin.isDestroyed() });
+  }
+
+  const w = createAlertWindow();
+  const hold = CUE_HOLD_MS;
+
+  const push = () => {
+    if (!w || w.isDestroyed()) return;
+    try {
+      const size = alertSize();
+      const b = w.getBounds();
+      if (b.width !== size || b.height !== size) w.setBounds({ ...b, width: size, height: size });
+      w.webContents.send('alert:show', { hold });
+      if (!w.isVisible() && !storyHidden) w.showInactive();
+      // 位置/半径可能刚改过，顺手把显示区域同步过去
+      sendAlertStream();
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  };
+
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', push);
+  else push();
+
+  clearTimeout(alertHideTimer);
+  alertHideTimer = setTimeout(() => {
+    if (!alertWin || alertWin.isDestroyed()) return;
+    if (alertPlacing) return; // 正在拖动就先别藏
+    try {
+      alertWin.hide(); // 隐藏窗口但保留屏幕流，下次点亮不用重连
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  }, CUE_HOLD_MS + ALERT_FADE_MS);
+}
+
 function sameWindowBounds(first, second) {
   return first.x === second.x && first.y === second.y && first.width === second.width && first.height === second.height;
 }
@@ -1482,6 +1721,16 @@ let lastApiSubtitleText = '';
 let lastDomSubtitleText = '';
 // 当前分 P 的 cid，字幕按它拉官方轨
 let currentCid = 0;
+// 放大提醒窗
+let alertWin = null;
+let alertPlacing = false;
+let alertStreamTimer = null;
+let lastAlertCueAt = 0;
+// 字幕续期（雷达光晕只亮 3.2 秒，字还挂着时要按节奏补）
+let lastCompassKeepAlive = 0;
+let lastCueTextAt = 0;
+let lastSubtitleTextAt = 0;
+let lastPartSwitchAt = 0;
 let overlayReleaseTimer = null;
 let overlayPlacing = false;
 let lastBearing = null;
@@ -2420,6 +2669,52 @@ function registerIpc() {
     pushTurnHint({ dir, label: String(payload.label || ''), text: String(payload.text || '') });
   });
 
+  /* ---- 罗盘雷达 / 放大提醒 ---- */
+  ipcMain.handle('alert:place', (_e, on) => {
+    const next = on === undefined ? !alertPlacing : !!on;
+    const result = setAlertPlacing(next);
+    // 进放置模式时同步一次显示区域，窗口才有画面
+    if (result) sendAlertStream();
+    return result;
+  });
+
+  ipcMain.on('compass:cue', (_e, cue) => {
+    const deg = Number(cue && cue.deg);
+    if (!Number.isFinite(deg)) return;
+    const alive = !!overlayWin && !overlayWin.isDestroyed();
+    console.log('[compass]', {
+      deg,
+      label: String(cue.label || ''),
+      text: String(cue.text || ''),
+      overlay: alive,
+      radar: !!settings.overlayRadar
+    });
+
+    /* 放大提醒：画面由常驻屏幕流实时提供，所以这里是「直接亮窗」，
+     * 没有任何抓图等待 —— 和雷达同一帧出现。
+     * 放在叠加层判断之前：提醒窗和雷达是两件事，
+     * 叠加层没开的时候提醒不该跟着一起哑掉。 */
+    showAlertCue();
+
+    if (!alive) return;
+    try {
+      overlayWin.webContents.send('compass:cue', { deg, label: String(cue.label || '') });
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  });
+
+  ipcMain.on('compass:none', (_e, payload = {}) => {
+    const now = Date.now();
+    if (now - lastCompassNoneAt < 2000) return;
+    lastCompassNoneAt = now;
+    console.log('[compassNone]', {
+      reason: String(payload.reason || ''),
+      text: String(payload.text || '').slice(0, 50),
+      deg: payload.deg
+    });
+  });
+
   ipcMain.handle('settings:save', (_e, patch = {}) => {
     const playbackChanged = updatePlaybackSettings(settings, patch);
     if (typeof patch.gamepadEnabled === 'boolean') setGamepadEnabled(patch.gamepadEnabled);
@@ -2466,6 +2761,20 @@ function registerIpc() {
     }
     for (const key of ['turnEnableLR', 'turnEnableUD']) {
       if (typeof patch[key] === 'boolean') { settings[key] = patch[key]; pushTurnConfig(); }
+    }
+    /* 罗盘雷达 / 放大提醒 */
+    if (typeof patch.overlayRadar === 'boolean') {
+      settings.overlayRadar = patch.overlayRadar;
+      pushRadarConfig();
+    }
+    if (typeof patch.alertEnabled === 'boolean') {
+      settings.alertEnabled = patch.alertEnabled;
+      if (settings.alertEnabled) createAlertWindow();
+      else if (alertWin && !alertWin.isDestroyed()) { alertWin.destroy(); alertWin = null; }
+    }
+    if (Number.isFinite(Number(patch.alertSize))) {
+      settings.alertSize = Math.max(120, Math.min(600, Number(patch.alertSize)));
+      if (alertWin && !alertWin.isDestroyed()) alertWin.setBounds(alertBounds());
     }
     if (playbackChanged || patch.holdPlaybackRate !== undefined) publishPlaybackSettings();
     // 自动连播 / 手动切 P 只带 lastPart：页码和时间要一起刷新，

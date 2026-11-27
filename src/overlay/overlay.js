@@ -320,12 +320,12 @@ window.overlayApi.onBearing((payload) => {
   if (!payload) return;
 
   if (payload.clear || payload.clearAngle) {
-    Object.assign(tween.arrow, { target: null, shown: null });
+    cancelAnimationFrame(tween.arrow.raf);
+    Object.assign(tween.arrow, { target: null, shown: null, raf: 0 });
     if (payload.clear) {
-      cancelAnimationFrame(animationFrame);
-      animationFrame = 0;
+      cancelAnimationFrame(tween.view.raf);
       clearTimeout(viewExpireTimer);
-      Object.assign(tween.view, { target: null, shown: null, at: 0 });
+      Object.assign(tween.view, { target: null, shown: null, raf: 0, at: 0 });
     }
     draw();
   }

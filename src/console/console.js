@@ -443,6 +443,8 @@ function fillSettings(settings) {
   $('setSubtitle').checked = !!settings.enableSubtitleSprite;
   $('setSubHideOnPause').checked = settings.subtitleHideOnPause === true;
   $('setTurnReminder').checked = !!settings.enableTurnReminder;
+  $('setOverlayRadar').checked = settings.overlayRadar === true;
+  $('setAlertEnabled').checked = !!settings.alertEnabled;
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -495,6 +497,16 @@ function wireSettings() {
     const on = event.target.checked;
     state.boot.settings.enableTurnReminder = on;
     window.api.save({ enableTurnReminder: on });
+  });
+  $('setOverlayRadar').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.overlayRadar = on;
+    window.api.save({ overlayRadar: on });
+  });
+  $('setAlertEnabled').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.alertEnabled = on;
+    window.api.save({ alertEnabled: on });
   });
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);
