@@ -5,7 +5,7 @@
  * 职责：无边框置顶窗口、全局快捷键、B 站视频解析、设置持久化
  */
 
-const { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, powerMonitor, powerSaveBlocker, screen, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile, execFileSync, spawn } = require('node:child_process');
@@ -440,7 +440,21 @@ const DEFAULT_SETTINGS = {
     y: null
   },
   // 手柄：L3 按住弹八方向圆盘，右摇杆选动作。结构与出厂值都在 gamepad-config.js
-  gamepad: DEFAULT_GAMEPAD
+  gamepad: DEFAULT_GAMEPAD,
+  /* 剧情自动隐藏：识别到剧情/对话时把叠加层收起来，看完再放回。
+   * 判据是模板匹配 —— 截游戏画面左上角一块做归一化互相关，
+   * 命中「UI 被禁用」那个图标就认为在放剧情。 */
+  storyAutoHide: {
+    enabled: false,
+    // 相似度阈值，0.75 左右表示形状对上了
+    threshold: 0.75,
+    // 扫描间隔：GDI 抓图 20~40ms、匹配 40ms，600ms 一轮 CPU 占用很低
+    interval: 600,
+    // 屏幕上画识别框（黄=识别区域，红=命中位置），排查时有用
+    showBox: true,
+    // 浮窗本身也藏起来。剧情时浮窗杵在那儿会挡住画面，默认藏
+    hideFloat: true
+  }
 };
 
 /**
@@ -545,7 +559,17 @@ function loadSettings() {
         x: Number.isFinite(rawBearing.x) ? rawBearing.x : null,
         y: Number.isFinite(rawBearing.y) ? rawBearing.y : null
       },
-      gamepad: mergeGamepadSettings(DEFAULT_SETTINGS.gamepad, raw.gamepad)
+      gamepad: mergeGamepadSettings(DEFAULT_SETTINGS.gamepad, raw.gamepad),
+      storyAutoHide: {
+        ...DEFAULT_SETTINGS.storyAutoHide,
+        ...(raw.storyAutoHide || {}),
+        /* 旧的 1200ms 默认值迁到新的 600ms：那个值会让「进剧情要 2.4 秒」，
+         * 用户反馈隐藏太慢。只迁移这一个特定值，用户自己调的其它值保留。 */
+        interval: (() => {
+          const v = Number(raw.storyAutoHide && raw.storyAutoHide.interval);
+          return Number.isFinite(v) && v > 0 && v !== 1200 ? v : DEFAULT_SETTINGS.storyAutoHide.interval;
+        })()
+      }
     };
   } catch {
     settings = structuredClone(DEFAULT_SETTINGS);
@@ -898,10 +922,18 @@ function notifyFloatState() {
   broadcast('float:state', floatState());
 }
 
+/** 浮窗当前该用的不透明度：剧情隐藏优先，其次悬停变淡。 */
+function effectiveOpacity() {
+  // 剧情中用全透明而不是 hide()：藏起来再放回会牵扯置顶层级、沉浸状态，
+  // 以及和「用户自己关了浮窗」的区分。
+  if (storyHidden && settings.storyAutoHide && settings.storyAutoHide.hideFloat) return 0;
+  return hoverFaded ? Math.min(settings.opacity, 0.1) : settings.opacity;
+}
+
 function applyWindowPresentation() {
   if (!win || win.isDestroyed()) return;
   win.setIgnoreMouseEvents(immersion || settings.clickThrough, { forward: true });
-  win.setOpacity(hoverFaded ? Math.min(settings.opacity, 0.1) : settings.opacity);
+  win.setOpacity(effectiveOpacity());
 }
 
 function updateHoverFade() {
@@ -930,6 +962,940 @@ function syncHoverFade() {
   applyWindowPresentation();
   if (immersion && settings.hoverFadeEnabled) hoverTimer = setInterval(updateHoverFade, 60);
 }
+
+/* ---------------------------------------------------- 剧情自动隐藏
+ *
+ * 视频进入剧情/对话时把叠加层全部收起来，看完再放回来。
+ * 识别由访客页做（模板匹配），这里只负责「藏」和「恢复」。
+ *
+ * 为什么必须记快照：这些窗口本来就有的开有的关（弹幕没开、字幕没开）。
+ * 恢复时无脑全部 show 会把用户根本没开的窗口也弹出来。
+ */
+let storyHidden = false;
+/** 藏之前各窗口的可见状态，恢复时按它还原 */
+let storySnapshot = null;
+
+function storyWindows() {
+  return [['overlay', overlayWin]];
+}
+
+function setStoryHidden(on) {
+  const want = !!on;
+  if (want === storyHidden) return;
+  // 先落状态：effectiveOpacity() 读的是 storyHidden，晚赋值会用到旧值
+  storyHidden = want;
+
+  if (want) {
+    storySnapshot = {};
+    for (const [name, w] of storyWindows()) {
+      storySnapshot[name] = !!w && !w.isDestroyed() && w.isVisible();
+      try {
+        if (w && !w.isDestroyed()) w.hide();
+      } catch {
+        /* 窗口正在销毁 */
+      }
+    }
+    /* 浮窗用「全透明」而不是 hide()：
+     * 用户要的是「看不见但还在」，藏起来再放回会牵扯置顶层级、
+     * 沉浸状态、以及和「他自己关了浮窗」的区分，容易出错。 */
+    console.log('[story]', { hidden: true, snapshot: storySnapshot, hideFloat: !!settings.storyAutoHide.hideFloat });
+    applyWindowPresentation();
+  } else {
+    const snap = storySnapshot || {};
+    for (const [name, w] of storyWindows()) {
+      if (!snap[name] || !w || w.isDestroyed()) continue;
+      try {
+        w.showInactive();
+      } catch {
+        /* 窗口正在销毁 */
+      }
+    }
+    storySnapshot = null;
+    applyWindowPresentation();
+    if (win && !win.isDestroyed()) applyPin();
+    console.log('[story]', { hidden: false });
+  }
+}
+
+/* ------------------------------------------- 剧情识别（模板匹配）
+ *
+ * 判据来自 BetterGI：AutoSkip 用 disabled_ui.png 匹配
+ *     roi = rect(0, 0, cw/3, ch/8)      // 游戏画面左上角 1/3 宽 × 1/8 高
+ * 那个「眼睛带斜杠」的图标只在 UI 被禁用（剧情/对话）时出现，
+ * 命中它就等于「现在在放剧情」。
+ *
+ * 实现：截一次屏 → 裁出左上角那块 → 灰度 → 和模板做归一化互相关（NCC）。
+ * 只搜一小块而不是全屏，是这套方案跑得动的前提：
+ * 640×135 里滑 28×20 的模板约 7 万个位置，隔点粗搜 + 邻域精修后
+ * 单次几十毫秒。
+ */
+const STORY_ROI = { w: 1 / 3, h: 1 / 8 };
+/** 模板是按 1920 宽做的，用它换算缩放 */
+const STORY_BASE_WIDTH = 1920;
+
+const storyWatch = {
+  timer: 0,
+  busy: false,
+  tmpl: null,
+  on: false,
+  hits: 0,
+  misses: 0,
+  /* 连续「看不见游戏」的轮数。截不到图既不是命中也不是落空，
+   * 单独计一路，否则切屏/抓图打嗝会直接把剧情状态翻回去。 */
+  stale: 0,
+  /* 是否已降频空转。连续看不见游戏时说明用户压根没开游戏（或在干别的），
+   * 还按 600ms 一轮去抓图纯属白烧 CPU —— 降到 STORY_IDLE_INTERVAL，
+   * 等真的抓到一帧再恢复正常间隔。 */
+  slow: false,
+  lastScore: 0,
+  lastLogged: 0,
+  lastDumpAt: 0
+};
+
+/* 去抖门槛（轮数 × interval 才是时长，默认 600ms 一轮）。
+ * 进剧情连续 2 轮（约 1.2s）：再快会在 UI 淡入时误藏。
+ * 出剧情连续 3 轮（约 1.8s）：比进剧情迟钝一档，避开转场/切镜头，
+ *   但也不至于慢到用户以为卡住。
+ * 看不见游戏连续 8 轮（约 4.8s）：短时间切屏不该把叠加层弹回来。 */
+const STORY_ENTER_HITS = 2;
+const STORY_EXIT_MISSES = 3;
+const STORY_STALE_LIMIT = 8;
+/* 连续看不见游戏后，扫描降到这个间隔（毫秒）。
+ * 没开游戏时仍按 600ms 空转纯属白烧 CPU —— 尤其是兜底路径每轮要 500ms+。
+ * 降到 3 秒，代价是游戏回来后最多晚 3 秒才响应，可以接受。 */
+const STORY_IDLE_INTERVAL = 3000;
+
+/** BGRA Buffer → 灰度 Float32Array */
+function grayFromBitmap(bmp, w, h) {
+  const out = new Float32Array(w * h);
+  for (let i = 0, j = 0; j < out.length; i += 4, j += 1) {
+    out[j] = 0.299 * bmp[i + 2] + 0.587 * bmp[i + 1] + 0.114 * bmp[i];
+  }
+  return out;
+}
+
+/** 读模板：官方 28×20 的 PNG → 灰度 */
+function loadStoryTemplate() {
+  if (storyWatch.tmpl) return storyWatch.tmpl;
+  try {
+    const file = path.join(__dirname, '..', 'assets', 'story', 'icon.png');
+    const img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return null;
+    const { width, height } = img.getSize();
+    storyWatch.tmpl = { w: width, h: height, gray: grayFromBitmap(img.toBitmap(), width, height) };
+    console.log('[story]', { template: [width, height] });
+    return storyWatch.tmpl;
+  } catch (err) {
+    console.log('[story]', { templateError: String((err && err.message) || err) });
+    return null;
+  }
+}
+
+/**
+ * 按屏幕宽度把模板等比缩放（模板是按 1920 宽做的）。
+ *
+ * 结果按尺寸缓存：原来每次扫描都重新读盘 + 解码 PNG + 缩放，
+ * 一秒一次白白烧 CPU。尺寸只跟分辨率有关，缓存住就行。
+ */
+const storyTmplCache = new Map();
+
+function scaledStoryTemplate(tmpl, screenW) {
+  const scale = screenW / STORY_BASE_WIDTH;
+  if (Math.abs(scale - 1) <= 0.08) return tmpl;
+
+  const nw = Math.max(8, Math.round(tmpl.w * scale));
+  const nh = Math.max(6, Math.round(tmpl.h * scale));
+  const key = nw + 'x' + nh;
+  const cached = storyTmplCache.get(key);
+  if (cached) return cached;
+
+  try {
+    const file = path.join(__dirname, '..', 'assets', 'story', 'icon.png');
+    const img = nativeImage.createFromPath(file);
+    const small = img.resize({ width: nw, height: nh, quality: 'best' });
+    const made = { w: nw, h: nh, gray: grayFromBitmap(small.toBitmap(), nw, nh) };
+    storyTmplCache.set(key, made);
+    return made;
+  } catch {
+    return tmpl;
+  }
+}
+
+/**
+ * 在 gray 里滑模板，返回最佳 NCC 分数。
+ * 粗搜隔 2 像素，再在最佳点邻域逐像素精修 —— 全像素搜要慢四倍，收益很小。
+ */
+function matchTemplate(gray, gw, gh, tmpl) {
+  const tw = tmpl.w;
+  const th = tmpl.h;
+  // 统一返回结构，调用方不用区分「没得比」和「比完了」
+  if (gw < tw || gh < th) return { score: -1, x: 0, y: 0, w: tw, h: th };
+
+  const t = tmpl.gray;
+  let tMean = 0;
+  for (let i = 0; i < t.length; i += 1) tMean += t[i];
+  tMean /= t.length;
+  let tNorm = 0;
+  for (let i = 0; i < t.length; i += 1) {
+    const d = t[i] - tMean;
+    tNorm += d * d;
+  }
+  tNorm = Math.sqrt(tNorm) || 1e-6;
+
+  const scoreAt = (ox, oy) => {
+    let sMean = 0;
+    for (let y = 0; y < th; y += 1) {
+      const row = (oy + y) * gw + ox;
+      for (let x = 0; x < tw; x += 1) sMean += gray[row + x];
+    }
+    sMean /= tw * th;
+
+    let num = 0;
+    let sNorm = 0;
+    for (let y = 0; y < th; y += 1) {
+      const row = (oy + y) * gw + ox;
+      const trow = y * tw;
+      for (let x = 0; x < tw; x += 1) {
+        const a = gray[row + x] - sMean;
+        const b = t[trow + x] - tMean;
+        num += a * b;
+        sNorm += a * a;
+      }
+    }
+    const den = Math.sqrt(sNorm) * tNorm;
+    return den > 1e-6 ? num / den : 0;
+  };
+
+  let best = -1;
+  let bx = 0;
+  let by = 0;
+  for (let y = 0; y + th <= gh; y += 2) {
+    for (let x = 0; x + tw <= gw; x += 2) {
+      const sc = scoreAt(x, y);
+      if (sc > best) {
+        best = sc;
+        bx = x;
+        by = y;
+      }
+    }
+  }
+  for (let y = Math.max(0, by - 2); y <= Math.min(gh - th, by + 2); y += 1) {
+    for (let x = Math.max(0, bx - 2); x <= Math.min(gw - tw, bx + 2); x += 1) {
+      const sc = scoreAt(x, y);
+      if (sc > best) {
+        best = sc;
+        bx = x;
+        by = y;
+      }
+    }
+  }
+  // 位置一起返回：调试时要画框，光有分数没法判断「差在哪」
+  return { score: best, x: bx, y: by, w: tw, h: th };
+}
+
+/** 截一次屏，裁左上角那块，返回灰度与尺寸 */
+/**
+ * 找原神窗口。
+ *
+ * BetterGI 是「只抓游戏窗口」的：全屏截图在有浮窗、有其他窗口、
+ * 或者游戏不是全屏时都不可靠 —— 左上角那块可能压根不是游戏画面。
+ * 这里用 windows 原生 API 拿到游戏窗口的位置，再按窗口矩形裁。
+ *
+ * 返回屏幕物理像素坐标（和截图分辨率同一坐标系）。
+ */
+/**
+ * 常驻的 GDI 截屏进程。
+ *
+ * 每次起一个 PowerShell 要 600~900ms（进程启动 + JIT + Add-Type），
+ * 而真正截图只要 10~30ms。常驻下来之后，一行 stdin 换一行 PNG 就够快。
+ *
+ * 用的 API 和 BetterGI 一样：System.Drawing.Graphics.CopyFromScreen，
+ * 底层是 GDI BitBlt。Electron 的 desktopCapturer 走 GPU 合成管线，
+ * 实测一次 500~3400ms，根本没法做到「一秒扫一次还不卡」。
+ */
+const storyCapture = {
+  proc: null,
+  queue: [],
+  buf: '',
+  starting: false,
+  failures: 0,
+  retryAt: 0,
+  // 上一轮失败原因：obscured / not-foreground / no-window / bad-size ...
+  lastReason: '',
+  // 上一轮认到的窗口身份（句柄|类名|进程|标题），没截图时也留着
+  lastIdent: null
+};
+
+function stopStoryCaptureProc() {
+  if (storyCapture.proc) {
+    try {
+      storyCapture.proc.stdin.end();
+      storyCapture.proc.kill();
+    } catch {
+      /* 进程已退出 */
+    }
+  }
+  storyCapture.proc = null;
+  storyCapture.buf = '';
+  // 挂起的请求全部按失败收场，否则 await 永远不返回
+  const pending = storyCapture.queue.splice(0);
+  for (const p of pending) p(null);
+}
+
+function ensureStoryCaptureProc() {
+  if (storyCapture.proc && !storyCapture.proc.killed) return storyCapture.proc;
+  if (storyCapture.starting) return null;
+  /* 连续失败就退避：起一个 PowerShell 要 600~900ms（还要 Add-Type 编译），
+   * 如果脚本一直失败还每 1.2 秒重起一个，机器会被拖垮。
+   * 失败三次后停 60 秒再试。 */
+  const now = Date.now();
+  if (storyCapture.failures >= 3 && now < storyCapture.retryAt) return null;
+
+  const script = path.join(__dirname, '..', 'assets', 'story', 'capture.ps1');
+  storyCapture.starting = true;
+  try {
+    const proc = spawn(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }
+    );
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk) => {
+      storyCapture.buf += chunk;
+      let nl = storyCapture.buf.indexOf('\n');
+      while (nl >= 0) {
+        const line = storyCapture.buf.slice(0, nl).trim();
+        storyCapture.buf = storyCapture.buf.slice(nl + 1);
+        // NONE:<reason>|窗口身份 里带上原因，主进程据此决定要不要恢复窗口。
+        // 身份也一起留着：没截到图时「窗口对不上」和「游戏没开」是两回事。
+        if (line.startsWith('NONE')) {
+          const rest = line.slice(line.indexOf(':') + 1);
+          const cut = rest.indexOf('|');
+          storyCapture.lastReason = cut >= 0 ? rest.slice(0, cut) : rest || 'unknown';
+          storyCapture.lastIdent = cut >= 0 ? parseStoryWindowIdent(rest.slice(cut + 1)) : null;
+        } else {
+          storyCapture.lastReason = '';
+          storyCapture.lastIdent = null;
+        }
+        const pending = storyCapture.queue.shift();
+        if (pending) pending(parseStoryCaptureLine(line));
+        nl = storyCapture.buf.indexOf('\n');
+      }
+    });
+
+    const onDead = () => {
+      storyCapture.proc = null;
+      storyCapture.failures += 1;
+      if (storyCapture.failures >= 3) storyCapture.retryAt = Date.now() + 60000;
+      stopStoryCaptureProc();
+    };
+    proc.on('exit', onDead);
+    proc.on('error', onDead);
+
+    storyCapture.proc = proc;
+    storyCapture.failures = 0;
+    return proc;
+  } catch {
+    return null;
+  } finally {
+    storyCapture.starting = false;
+  }
+}
+
+/** 认窗口身份的 "句柄|类名|进程id|标题" → 对象。取不到返回 null */
+function parseStoryWindowIdent(ident) {
+  if (!ident) return null;
+  const parts = String(ident).split('|');
+  if (parts.length < 2) return null;
+  const hwnd = Number(parts[0]) || 0;
+  const cls = parts[1] || '';
+  const pid = Number(parts[2]) || 0;
+  // 标题里可能带 '|'，剩下的全部拼回去
+  const title = parts.slice(3).join('|');
+  if (!hwnd && !cls && !pid) return null;
+  return { hwnd, cls, pid, title };
+}
+
+/** "gameW|gameH|roiW|roiH|base64png|ident" → 结果对象；NONE 返回 null */
+function parseStoryCaptureLine(line) {
+  if (!line || line.startsWith('NONE')) return null;
+  /* 格式：客户区X|Y|游戏宽|游戏高|ROI宽|ROI高|PNG|偏移X|偏移Y|整块尺寸|窗口身份
+   * 窗口身份放最后：标题里可能带 '|'，它之后的字段没法按固定下标取。 */
+  const parts = line.split('|');
+  if (parts.length < 7) return null;
+  const [srcX, srcY, gw, gh, rw, rh, b64] = parts;
+  if (!b64) return null;
+  try {
+    const img = nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
+    if (img.isEmpty()) return null;
+    const size = img.getSize();
+    // 子区域偏移：命中坐标要加上它才能换算回整块 ROI
+    const offX = Number(parts[7]) || 0;
+    const offY = Number(parts[8]) || 0;
+    // '640x135' → 整块尺寸，画识别区域框要用它（不能拿子区域去画）
+    const full = String(parts[9] || '').match(/^(\d+)x(\d+)$/);
+    // 窗口身份：句柄 / 类名 / 进程 id / 标题。日志里必须留一份，
+    // 否则「分数一直 0.4x」时无从判断是截错窗口还是模板不对。
+    const ident = parseStoryWindowIdent(parts.slice(10).join('|'));
+    return {
+      gray: grayFromBitmap(img.toBitmap(), size.width, size.height),
+      w: size.width,
+      h: size.height,
+      img,
+      // 客户区在屏幕上的位置和尺寸（物理像素），画框要用
+      srcX: Number(srcX) || 0,
+      srcY: Number(srcY) || 0,
+      gameW: Number(gw) || 0,
+      gameH: Number(gh) || 0,
+      roiW: Number(rw) || size.width,
+      roiH: Number(rh) || size.height,
+      // 这次实际截的子区域相对整块的偏移
+      offX,
+      offY,
+      // 整块 ROI 尺寸（未裁剪时等于 roiW/roiH）
+      fullW: full ? Number(full[1]) : Number(rw) || size.width,
+      fullH: full ? Number(full[2]) : Number(rh) || size.height,
+      found: true,
+      // 名字仍然给一个默认值，但真正的证据是下面的 ident
+      name: (ident && ident.title) || '原神',
+      ident
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 让常驻进程截一张。超时或进程挂了就返回 null */
+/* 图标固定在左上角这块区域里（实测命中点在 640×135 内的 266,38 与 361,45，
+ * 随浮窗是否遮挡/UI 版本会有 ±100px 的横向漂移）。
+ * 先只抓这块，匹配面积降到约 1/5，一轮从 100ms 降到 ~25ms。
+ * 范围要给足余量 —— 之前取 x 0.30~0.56 太窄，图标右移 3px 就落到界外，
+ * 结果每轮都回退整块，反而更慢。 */
+const STORY_TIGHT_ROI = { x: 0.24, y: 0.02, w: 0.42, h: 0.80 };
+
+function grabStoryRoiGdi(tight = true) {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const proc = ensureStoryCaptureProc();
+    if (!proc) {
+      resolve(null);
+      return;
+    }
+
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      resolve(v);
+    };
+
+    storyCapture.queue.push(finish);
+    // 1.5 秒还没回来说明这条链路不正常，直接判失败，别拖着
+    setTimeout(() => {
+      if (done) return;
+      const i = storyCapture.queue.indexOf(finish);
+      if (i >= 0) storyCapture.queue.splice(i, 1);
+      finish(null);
+    }, 1500);
+
+    try {
+      const cmd = tight
+        ? `CAP ${STORY_TIGHT_ROI.x} ${STORY_TIGHT_ROI.y} ${STORY_TIGHT_ROI.w} ${STORY_TIGHT_ROI.h}\n`
+        : 'CAP\n';
+      proc.stdin.write(cmd);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/**
+ * 兜底：GDI 拿不到时（权限、非 Windows、PowerShell 被策略禁掉），
+ * 退回 Electron 的 desktopCapturer。
+ *
+ * 这条路径慢得多（一次 500ms 以上），而且有可能截到挡住游戏的窗口，
+ * 所以只在 GDI 失败时用，日志里会标明走了哪条路。
+ */
+/** 兜底路径截图的宽度：只需要左上角一块，960 够用且快 */
+const STORY_CAPTURE_WIDTH = 960;
+
+async function grabStoryRoiFallback() {
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: STORY_CAPTURE_WIDTH, height: Math.round((STORY_CAPTURE_WIDTH * 9) / 16) }
+  });
+  if (!sources.length) return null;
+
+  /* 只在窗口确实就是游戏时才用兜底结果。
+   *
+   * 松匹配会抓到自己的浮窗或标题带「原神」的浏览器，拿那种画面去比对
+   * 只有 0.4~0.5 的低分，看着像「没命中图标」，其实是截错了对象。
+   * 判据与抓图脚本一致：标题必须就是游戏名，并按 id 排掉本进程窗口。
+   * 对不上返回 null，上层当成「这一轮没结论」而不是「剧情结束」。 */
+  const GAME_TITLE = /^原神(\s|$|[·\-—_（(])|^Genshin\s*Impact\b/i;
+  /* id 格式是 window:窗口句柄:YY，YY=1 表示「本进程自己的窗口」。
+   * 这一条不靠猜标题，直接按 Electron 的定义排掉我们自己的浮窗。 */
+  const isOwnWindow = (x) => String(x.id || '').split(':')[2] === '1';
+  const looksLikeGame = (x) => {
+    if (isOwnWindow(x)) return false;
+    const n = String(x.name || '').trim();
+    if (!n) return false;
+    // 兜底再排一次本项目窗口，防止 id 规则在别的系统上不成立
+    if (n.includes('跟跑助手')) return false;
+    return GAME_TITLE.test(n);
+  };
+  const src = sources.find(looksLikeGame) || null;
+  if (!src || !src.thumbnail || src.thumbnail.isEmpty()) {
+    storyCapture.lastReason = 'fallback-no-game-window';
+    return null;
+  }
+
+  const game = src.thumbnail;
+  const gs = game.getSize();
+  if (gs.width < 200 || gs.height < 100) return null;
+
+  const rw = Math.min(gs.width, Math.max(32, Math.round(gs.width * STORY_ROI.w)));
+  const rh = Math.min(gs.height, Math.max(32, Math.round(gs.height * STORY_ROI.h)));
+  const cropped = game.crop({ x: 0, y: 0, width: rw, height: rh });
+  const cs = cropped.getSize();
+
+  return {
+    gray: grayFromBitmap(cropped.toBitmap(), cs.width, cs.height),
+    w: cs.width,
+    h: cs.height,
+    img: cropped,
+    gameW: gs.width,
+    gameH: gs.height,
+    found: true,
+    name: src.name || '',
+    fallback: true
+  };
+}
+
+/** 对外保持同一个入口，先走 GDI，不行再退回 desktopCapturer */
+/* GDI 已经给出**明确结论**的原因码。
+ *
+ * capture.ps1 一旦返回这些，就说明它成功枚举了窗口、拿到了确定答案：
+ *   no-window      窗口列表里没有游戏
+ *   no-rect        拿到了窗口但取不到矩形
+ *   obscured       识别区域被别的窗口盖住
+ *   not-foreground 游戏不在前台
+ *   bad-size/bad-roi 尺寸或区域不合法
+ *
+ * 这种情况下不能再走 desktopCapturer 兜底。兜底是给「GDI 本身不可用」
+ * 准备的（PowerShell 被禁用、非 Windows、C# 编译失败），它要枚举全部窗口
+ * 并抓缩略图，一次 500ms 以上。而 GDI 已经枚举过窗口、只是没找到游戏时，
+ * 兜底只会得到同样的结论，白付代价。
+ */
+const STORY_GDI_DEFINITE_MISS = new Set([
+  'no-window', 'no-rect', 'obscured', 'not-foreground', 'bad-size', 'bad-roi'
+]);
+
+/** 整块 1/3×1/8 再抓一次。只在两级搜索的第一级没命中时才调用。 */
+async function grabStoryRoiWide() {
+  const gdi = await grabStoryRoiGdi(false);
+  if (gdi) return gdi;
+  // GDI 已给出确定结论（含被遮挡 / 不在前台）时不许走兜底：
+  // 兜底对后台窗口返回缓存帧，会给出接近 1 的假满分。
+  if (STORY_GDI_DEFINITE_MISS.has(storyCapture.lastReason)) return null;
+  return grabStoryRoiFallback();
+}
+
+/** 对外保持同一个入口，先走 GDI，不行再退回 desktopCapturer */
+async function grabStoryRoi() {
+  const gdi = await grabStoryRoiGdi(true);
+  if (gdi) return gdi;
+
+  /* GDI 已给出明确结论时，不再走 desktopCapturer 兜底。
+   *
+   * 兜底只该在 GDI 根本没跑起来时用（PowerShell 被禁用、非 Windows、
+   * C# 编译失败 —— 对应 bad-cmd）。只要 GDI 返回了明确原因，说明它成功
+   * 枚举了窗口、拿到了确定答案：
+   *
+   *   no-window / no-rect / bad-size / bad-roi
+   *     游戏不在窗口列表或几何不合法。兜底枚举的是同一批窗口，
+   *     结论一样，却要多付枚举全部窗口并抓缩略图的代价。
+   *
+   *   obscured / not-foreground
+   *     游戏在，但不在前台或被盖住。兜底对后台窗口返回缓存的旧帧，
+   *     那帧里只要有图标就给接近 1 的假满分 —— 比低分危险得多：
+   *     用户切去看攻略，程序却判定还在剧情，叠加层一直藏着不回来。
+   */
+  if (STORY_GDI_DEFINITE_MISS.has(storyCapture.lastReason)) return null;
+
+  return grabStoryRoiFallback();
+}
+
+
+/* ------------------------------------------------- 识别结果遮罩
+ *
+ * 参考 BetterGI 的「识别结果遮罩」：把识别区域和命中位置直接画在屏幕上。
+ * 排查「为什么不生效」时，看一眼框落在哪就知道是 ROI 偏了、模板不对，
+ * 还是压根没命中 —— 比翻日志快得多。
+ */
+let storyBoxWin = null;
+
+function ensureStoryBox() {
+  if (storyBoxWin && !storyBoxWin.isDestroyed()) return storyBoxWin;
+  const d = screen.getPrimaryDisplay();
+  storyBoxWin = new BrowserWindow({
+    ...d.bounds,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'storybox', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  });
+
+  storyBoxWin.setAlwaysOnTop(true, 'screen-saver');
+  storyBoxWin.setIgnoreMouseEvents(true, { forward: true });
+  storyBoxWin.loadFile(path.join(__dirname, 'storybox', 'index.html'));
+
+  storyBoxWin.once('ready-to-show', () => {
+    try {
+      if (storyBoxWin && !storyBoxWin.isDestroyed()) storyBoxWin.showInactive();
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  });
+  storyBoxWin.on('closed', () => {
+    storyBoxWin = null;
+  });
+  return storyBoxWin;
+}
+
+/** 只清空画面，不销毁窗口 —— 每秒销毁重建窗口会额外制造卡顿 */
+function clearStoryBox() {
+  try {
+    if (storyBoxWin && !storyBoxWin.isDestroyed()) {
+      storyBoxWin.webContents.send('storybox:draw', { found: false });
+    }
+  } catch {
+    /* 窗口正在销毁 */
+  }
+}
+
+function destroyStoryBox() {
+  if (storyBoxWin && !storyBoxWin.isDestroyed()) {
+    try {
+      storyBoxWin.destroy();
+    } catch {
+      /* 已经没了 */
+    }
+  }
+  storyBoxWin = null;
+}
+
+/**
+ * 把这次的识别结果画到遮罩上。
+ *
+ * 坐标换算：截屏拿到的是**物理像素**，canvas 用的是 CSS 像素，
+ * 中间差一个 display.scaleFactor；还要把客户区原点搬到窗口内坐标。
+ */
+function drawStoryBox(roi, hit, score, threshold) {
+  if (!settings.storyAutoHide || settings.storyAutoHide.showBox === false) {
+    clearStoryBox();
+    return;
+  }
+
+  /* 兜底路径（desktopCapturer）拿不到客户区在屏幕上的坐标，
+   * 硬画会画到错的地方，不如不画。 */
+  if (typeof roi.srcX !== 'number' || typeof roi.srcY !== 'number') {
+    clearStoryBox();
+    return;
+  }
+
+  const d = screen.getPrimaryDisplay();
+  const k = d.scaleFactor || 1;
+  const ox = d.bounds.x;
+  const oy = d.bounds.y;
+
+  const toCss = (px, py, pw, ph) => ({
+    x: px / k - ox,
+    y: py / k - oy,
+    w: pw / k,
+    h: ph / k
+  });
+
+  /* 分数低时「最佳匹配位置」是噪声：模板在画面任何地方都能凑出 0.4~0.6，
+   * 那个位置每帧都在跳，看起来像程序在乱抓。
+   * 只在这两个条件之一成立时才画命中框：
+   *   1. 分数已经够高，位置有意义
+   *   2. 已经判定命中（比分门槛还高）
+   * 其余情况只画识别区域，画面保持干净。 */
+  /* 分数低时「最佳匹配位置」是噪声：模板在画面任何地方都能凑出 0.5~0.7，
+   * 那个位置每帧都在跳，看起来像程序在乱抓。
+   * 只在分数已经够高（接近命中）时才画命中框，其余只留识别区域。
+   * 门槛取 0.72：比阈值 0.75 略低一点，能在「快要命中」时给出提示，
+   * 又不至于让 0.6x 的噪声框满屏跳。 */
+  const STORY_HIT_VISIBLE = 0.72;
+  const showHit = !!hit && score >= Math.min(STORY_HIT_VISIBLE, threshold);
+
+  const payload = {
+    found: !!roi.found,
+    score,
+    hitHit: score >= threshold,
+    /* 黄框画整块识别区域（不是这次截的子区域），用户才知道程序在看哪儿；
+     * 红框要加上子区域偏移才会落在真实位置。 */
+    roi: toCss(roi.srcX || 0, roi.srcY || 0, roi.fullW || roi.roiW || roi.w, roi.fullH || roi.roiH || roi.h),
+    hit: showHit
+      ? toCss((roi.srcX || 0) + (roi.offX || 0) + hit.x, (roi.srcY || 0) + (roi.offY || 0) + hit.y, hit.w, hit.h)
+      : null
+  };
+
+  const w = ensureStoryBox();
+  const send = () => {
+    try {
+      if (w && !w.isDestroyed()) w.webContents.send('storybox:draw', payload);
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  };
+  if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send);
+  else send();
+}
+
+async function storyProbe() {
+  if (storyWatch.busy) return;
+  const cfg = settings.storyAutoHide;
+  if (!cfg || !cfg.enabled) return;
+  const tmpl = loadStoryTemplate();
+  if (!tmpl) return;
+
+  storyWatch.busy = true;
+  const t0 = Date.now();
+  try {
+    const tGrab = Date.now();
+    /* 两级搜索：先只抓图标所在的小区域（快约 10 倍），
+     * 没命中再退回整块 1/3×1/8。
+     * 平时走小区域，一轮 100ms → 约 25ms；
+     * 布局真变了（分辨率 / UI 缩放 / 别的客户端）也不会漏，只是那一轮慢一点。 */
+    let roi = await grabStoryRoi();
+    if (roi) {
+      // 这次抓的是子区域时，模板要按子区域宽度缩放才能比较
+      const shotW = roi.w / STORY_TIGHT_ROI.w / STORY_ROI.w;
+      const narrowTmpl = scaledStoryTemplate(loadStoryTemplate(), shotW);
+      const preHit = narrowTmpl ? matchTemplate(roi.gray, roi.w, roi.h, narrowTmpl) : null;
+      const thrNow = Number(cfg.threshold) || 0.75;
+      if (!preHit || preHit.score < thrNow) {
+        // 小区域没找到：退回整块再来一次（只在必要时付这份钱）
+        const wide = await grabStoryRoiWide();
+        if (wide) roi = wide;
+      }
+    }
+    if (!roi) {
+      /* 截不到图 = 这一轮没有结论，不是「剧情结束」。
+       *
+       * 以前这里一帧失败就立刻 setStoryHidden(false)，于是：
+       * 用户切一下屏、抓图打一次嗝，叠加层就弹回来，回到游戏又藏起来 ——
+       * 肉眼看到的就是「一直在抽」。日志里 9 秒一翻就是这么来的。
+       *
+       * 现在的规则：连续 STORY_STALE_LIMIT 轮都看不见游戏，才认为
+       * 用户确实离开了（或者关了游戏），这时恢复窗口。
+       * 中途只要截到一帧就清零，短暂切屏完全不影响状态。 */
+      storyWatch.stale += 1;
+      clearStoryBox();
+      const reason = storyCapture.lastReason || 'unknown';
+      if (storyWatch.stale < STORY_STALE_LIMIT) {
+        if (Date.now() - storyWatch.lastLogged > 5000) {
+          storyWatch.lastLogged = Date.now();
+          console.log('[story]', {
+            skip: reason,
+            stale: storyWatch.stale,
+            hold: storyWatch.on,
+            win: storyCapture.lastIdent || null
+          });
+        }
+        return;
+      }
+      if (storyWatch.on) {
+        storyWatch.on = false;
+        storyWatch.hits = 0;
+        setStoryHidden(false);
+      }
+      if (Date.now() - storyWatch.lastLogged > 5000) {
+        storyWatch.lastLogged = Date.now();
+        console.log('[story]', {
+          skip: reason,
+          stale: storyWatch.stale,
+          giveUp: true,
+          win: storyCapture.lastIdent || null
+        });
+      }
+      /* 已经确认「看不见游戏」很多轮了：降到慢速轮询。
+       *
+       * 不这么做的话，定时器会一直按 600ms 空转 —— 用户没开游戏、
+       * 或者只是在干别的事时，程序每 600ms 醒一次去枚举窗口、抓图、
+       * 匹配模板，纯属白烧 CPU。日志里 stale 涨到 698 就是这来的。
+       * 降到 3 秒一轮，代价是「游戏重新出现后最多晚 3 秒才反应过来」，
+       * 对自动隐藏来说完全可以接受。 */
+      if (!storyWatch.slow) {
+        storyWatch.slow = true;
+        const iv = rearmStoryWatch(STORY_IDLE_INTERVAL);
+        console.log('[story]', { idle: true, interval: iv });
+      }
+      return;
+    }
+    // 截到图了，说明刚才的「看不见」是暂时的
+    storyWatch.stale = 0;
+    // 之前降过频就恢复正常节奏
+    if (storyWatch.slow) {
+      storyWatch.slow = false;
+      const iv = rearmStoryWatch(storyNormalInterval());
+      console.log('[story]', { idle: false, interval: iv });
+    }
+    const grabMs = Date.now() - tGrab;
+
+    const tMatch = Date.now();
+    /* 模板按「整块 ROI 对应的屏幕宽度」缩放。
+     * 用 roi.fullW 而不是 roi.w：子区域时 roi.w 只有整块的四分之一，
+     * 直接拿它算会把模板缩得过小，分数全崩。 */
+    const t = scaledStoryTemplate(tmpl, (roi.fullW || roi.w) / STORY_ROI.w);
+    const hit = matchTemplate(roi.gray, roi.w, roi.h, t);
+    const score = hit.score;
+    const matchMs = Date.now() - tMatch;
+    const ms = Date.now() - t0;
+    storyWatch.lastScore = score;
+
+
+    /* 没找到原神窗口时截到的是桌面/别的窗口，那里的「匹配」纯属巧合。
+     * 拿它去藏窗口会有很荒唐的后果：游戏明明没开，浮窗却被藏了。
+     * 所以这种情况直接跳过判定，只保留日志。 */
+    if (!roi.found) {
+      /* 兜底路径拿不到窗口坐标时也算「没结论」，同样不该推进状态机 ——
+       * 否则一次截错对象就会被当成落空，把刚进去的剧情判成结束。 */
+      storyWatch.stale += 1;
+      if (Date.now() - storyWatch.lastLogged > 5000) {
+        storyWatch.lastLogged = Date.now();
+        console.log('[story]', {
+          skip: 'no-window',
+          stale: storyWatch.stale,
+          score: Math.round(score * 1000) / 1000,
+          win: roi.ident || null
+        });
+      }
+      return;
+    }
+
+    const thr = Number(cfg.threshold) || 0.75;
+    // 每轮都把识别结果画到遮罩上，肉眼能看到「在看哪儿、命中的位置」
+    drawStoryBox(roi, hit, score, thr);
+
+    if (score >= thr) {
+      storyWatch.hits += 1;
+      storyWatch.misses = 0;
+    } else {
+      storyWatch.misses += 1;
+      storyWatch.hits = 0;
+    }
+
+    /* 去抖：进剧情要连续 STORY_ENTER_HITS 轮，出剧情要连续 STORY_EXIT_MISSES 轮。
+     * 单帧误判很常见（UI 淡入淡出、转场），只认连续。
+     * 出剧情那一侧刻意比进剧情更迟钝 —— 用户感受到的「抽动」几乎都发生在
+     * 剧情结束前后：转场、镜头切换、UI 复位都会让图标短暂消失。 */
+    if (!storyWatch.on && storyWatch.hits >= STORY_ENTER_HITS) {
+      storyWatch.on = true;
+      setStoryHidden(true);
+    } else if (storyWatch.on && storyWatch.misses >= STORY_EXIT_MISSES) {
+      storyWatch.on = false;
+      setStoryHidden(false);
+    }
+
+    // 15 秒最多记一条，够调阈值又不刷屏
+    if (Date.now() - storyWatch.lastLogged > 15000) {
+      storyWatch.lastLogged = Date.now();
+      console.log('[story]', {
+        score: Math.round(score * 1000) / 1000,
+        // 换算成整块 ROI 坐标，和子区域无关 —— 这样不同版本、不同裁剪下的
+        // 日志可以直接对比，不会被子区域偏移带偏
+        at: [hit.x + (roi.offX || 0), hit.y + (roi.offY || 0)],
+        roi: [roi.w, roi.h],
+        tmpl: [t.w, t.h],
+        // found=false 说明没找到原神窗口，退回全屏截的 —— 那种情况多半不准
+        found: roi.found,
+        name: roi.name,
+        // 截的是哪个窗口：句柄 / 类名 / 进程 / 标题。
+        // 没有这一项，「分数低」到底是窗口抓错了还是模板不对，分不清。
+        win: roi.ident || null,
+        game: [roi.gameW, roi.gameH],
+        // 分段耗时：grab 慢说明截屏是瓶颈，match 慢说明搜索范围太大
+        ms,
+        grabMs,
+        matchMs,
+        on: storyWatch.on
+      });
+    }
+  } catch (err) {
+    console.log('[story]', { error: String((err && err.message) || err) });
+  } finally {
+    storyWatch.busy = false;
+  }
+}
+
+function stopStoryWatch() {
+  if (storyWatch.timer) {
+    clearInterval(storyWatch.timer);
+    storyWatch.timer = 0;
+  }
+  // 常驻的截屏进程一起收掉，别留个 PowerShell 挂在那里
+  stopStoryCaptureProc();
+  destroyStoryBox();
+  /* 停扫时一定要把窗口放回来。
+   * 否则一旦上次判定为「剧情中」，关掉开关后窗口就永远藏着了 ——
+   * 用户只会看到「点了启动跟跑什么都没出来」。 */
+  if (storyHidden || storyWatch.on) {
+    storyWatch.on = false;
+    setStoryHidden(false);
+  }
+  storyWatch.hits = 0;
+  storyWatch.misses = 0;
+  storyWatch.stale = 0;
+  storyWatch.slow = false;
+  if (storyWatch.on) {
+    storyWatch.on = false;
+    setStoryHidden(false);
+  }
+}
+
+/** 配置里的正常扫描间隔（与 DEFAULT_SETTINGS.storyAutoHide.interval 同口径） */
+function storyNormalInterval() {
+  const cfg = settings.storyAutoHide;
+  return Math.max(300, Math.min(5000, Number(cfg && cfg.interval) || 600));
+}
+
+/** 按给定间隔重挂定时器。降频和恢复正常都走这里，避免两处各写一遍 clear/set。 */
+function rearmStoryWatch(iv) {
+  if (storyWatch.timer) {
+    clearInterval(storyWatch.timer);
+    storyWatch.timer = 0;
+  }
+  storyWatch.timer = setInterval(storyProbe, iv);
+  return iv;
+}
+
+function restartStoryWatch() {
+  stopStoryWatch();
+  const cfg = settings.storyAutoHide;
+  if (!cfg || !cfg.enabled) return;
+  const iv = rearmStoryWatch(storyNormalInterval());
+  console.log('[story]', { watch: true, interval: iv });
+}
+
 
 function sameWindowBounds(first, second) {
   return first.x === second.x && first.y === second.y && first.width === second.width && first.height === second.height;
@@ -1962,6 +2928,28 @@ function registerIpc() {
       syncHoverFade();
       notifyFloatState();
     }
+    if (patch.storyAutoHide) {
+      const v = patch.storyAutoHide;
+      const cur = settings.storyAutoHide;
+      if (typeof v.enabled === 'boolean') cur.enabled = v.enabled;
+      if (typeof v.hideFloat === 'boolean') {
+        cur.hideFloat = v.hideFloat;
+        applyWindowPresentation();
+      }
+      if (typeof v.showBox === 'boolean') {
+        cur.showBox = v.showBox;
+        if (!v.showBox) clearStoryBox();
+      }
+      if (Number.isFinite(Number(v.threshold))) {
+        cur.threshold = Math.max(0.4, Math.min(0.95, Number(v.threshold)));
+      }
+      if (Number.isFinite(Number(v.interval))) {
+        cur.interval = Math.max(300, Math.min(5000, Number(v.interval)));
+      }
+      // 关掉时立刻把窗口放回来，别让用户对着空屏幕找开关
+      if (!cur.enabled) setStoryHidden(false);
+      restartStoryWatch();
+    }
     if (playbackChanged || patch.holdPlaybackRate !== undefined) publishPlaybackSettings();
     // 自动连播 / 手动切 P 只带 lastPart：页码和时间要一起刷新，
     // 否则启动器上的「上次看到」会一直停在第一次打开视频那一刻。
@@ -2318,6 +3306,12 @@ if (!gotLock) {
     await registerUpdates().catch(error => console.warn('[update] initialization failed:', error.message));
     for (const event of ['display-added', 'display-removed', 'display-metrics-changed']) {
       screen.on(event, fitImmersionWindow);
+    }
+    // 剧情自动隐藏：设置里开着才起扫描循环
+    try {
+      restartStoryWatch();
+    } catch (err) {
+      console.warn('[story] 启动扫描失败：', err.message);
     }
     const launcher = createConsole(); // 先出启动器，配置好了再点「启动跟跑」
     launcher.on('close', event => {
