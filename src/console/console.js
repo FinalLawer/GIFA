@@ -440,6 +440,16 @@ function fillSettings(settings) {
   renderGamepadDevices(settings);
   $('setImmersion').checked = state.immersion;
   $('setHoverFade').checked = settings.hoverFadeEnabled !== false;
+  $('setSubtitle').checked = !!settings.enableSubtitleSprite;
+  $('setSubHideOnPause').checked = settings.subtitleHideOnPause === true;
+  $('setSubPauseOnClear').checked = settings.subtitlePauseOnClear === true;
+  const pauseDelay = Number(settings.subtitlePauseDelay);
+  const delay = Number.isFinite(pauseDelay) ? Math.max(0, Math.min(10, pauseDelay)) : 2.5;
+  $('setSubPauseDelay').value = String(delay);
+  $('subPauseDelayVal').textContent = delay === 0 ? '立即' : delay + ' s';
+  $('setTurnReminder').checked = !!settings.enableTurnReminder;
+  $('setOverlayRadar').checked = settings.overlayRadar === true;
+  $('setAlertEnabled').checked = !!settings.alertEnabled;
   const holdRate = Number(settings.holdPlaybackRate);
   $('setHoldRate').value = String(HOLD_RATES.includes(holdRate) ? holdRate : 2);
   renderPlaybackHints();
@@ -477,6 +487,42 @@ function wireSettings() {
     const enabled = event.target.checked;
     state.boot.settings.hoverFadeEnabled = enabled;
     window.api.save({ hoverFadeEnabled: enabled });
+  });
+  $('setSubtitle').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.enableSubtitleSprite = on;
+    window.api.save({ enableSubtitleSprite: on });
+  });
+  $('setSubHideOnPause').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.subtitleHideOnPause = on;
+    window.api.save({ subtitleHideOnPause: on });
+  });
+  $('setSubPauseOnClear').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.subtitlePauseOnClear = on;
+    window.api.save({ subtitlePauseOnClear: on });
+  });
+  $('setSubPauseDelay').addEventListener('input', (event) => {
+    const v = Number(event.target.value);
+    $('subPauseDelayVal').textContent = v === 0 ? '立即' : v + ' s';
+    state.boot.settings.subtitlePauseDelay = v;
+    window.api.save({ subtitlePauseDelay: v });
+  });
+  $('setTurnReminder').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.enableTurnReminder = on;
+    window.api.save({ enableTurnReminder: on });
+  });
+  $('setOverlayRadar').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.overlayRadar = on;
+    window.api.save({ overlayRadar: on });
+  });
+  $('setAlertEnabled').addEventListener('change', (event) => {
+    const on = event.target.checked;
+    state.boot.settings.alertEnabled = on;
+    window.api.save({ alertEnabled: on });
   });
   $('setHoldRate').addEventListener('change', (event) => {
     const holdRate = Number(event.target.value);

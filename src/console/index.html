@@ -269,6 +269,49 @@
                   <span class="setting-text"><strong>鼠标移入自动变淡</strong><small>沉浸模式下，鼠标移入时降至 10% 不透明度。</small></span>
                   <span class="switch"><input type="checkbox" id="setHoverFade" /></span>
                 </label>
+                <label class="setting" for="setSubtitle">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-video"></use></svg></span>
+                  <span class="setting-text"><strong>底部字幕精灵</strong><small>在屏幕底部显示视频字幕。优先用 B 站官方字幕接口。</small></span>
+                  <span class="switch"><input type="checkbox" id="setSubtitle" /></span>
+                </label>
+                <label class="setting" for="setSubHideOnPause">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-eye"></use></svg></span>
+                  <span class="setting-text"><strong>暂停时隐藏字幕</strong><small>关掉则暂停后字幕保持显示</small></span>
+                  <span class="switch"><input type="checkbox" id="setSubHideOnPause" /></span>
+                </label>
+                <label class="setting" for="setSubPauseOnClear">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-video"></use></svg></span>
+                  <span class="setting-text">
+                    <strong>提到「清怪」时自动暂停</strong>
+                    <small>字幕出现「清怪」时把视频停住，方便先打完再继续；不会自动恢复。<br />
+                      <b>实验性功能，默认不开启。</b>受技术限制：识别靠字幕文本，字幕说的是「说话时间」而</small>
+                    <small>非「画面时间」，两者通常有几秒偏差，暂停时会落在清怪段落前后而非正下方。</small>
+                  </span>
+                  <span class="switch"><input type="checkbox" id="setSubPauseOnClear" /></span>
+                </label>
+                <label class="setting" for="setSubPauseDelay">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-clock"></use></svg></span>
+                  <span class="setting-text">
+                    <strong>延迟几秒再暂停</strong>
+                    <small>字幕是整句一起出现的，留出读完这句的时间；0 表示立即暂停</small>
+                  </span>
+                  <span class="setting-ctrl"><input type="range" id="setSubPauseDelay" min="0" max="10" step="0.5" /><span class="val" id="subPauseDelayVal">2.5</span></span>
+                </label>
+                <label class="setting" for="setTurnReminder">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-next"></use></svg></span>
+                  <span class="setting-text"><strong>字幕转向提醒</strong><small>字幕出现「左转/右转/往东」等词时，画面边缘弹大箭头。</small></span>
+                  <span class="switch"><input type="checkbox" id="setTurnReminder" /></span>
+                </label>
+                <label class="setting" for="setOverlayRadar">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-compass"></use></svg></span>
+                  <span class="setting-text"><strong>圈上加四轴方位</strong><small>开 = 圆环上多画北/东/南/西四轴，字幕出现方位时点亮对应方向；关 = 只画圆环、箭头和绿弧。</small></span>
+                  <span class="switch"><input type="checkbox" id="setOverlayRadar" /></span>
+                </label>
+                <label class="setting" for="setAlertEnabled">
+                  <span class="setting-ico"><svg class="ico"><use href="#i-target"></use></svg></span>
+                  <span class="setting-text"><strong>放大提醒</strong><small>方位点亮时，把你的游戏小地图抓一帧放大显示；雷达灭了它也跟着灭。</small></span>
+                  <span class="switch"><input type="checkbox" id="setAlertEnabled" /></span>
+                </label>
                 <label class="setting" for="setPin">
                   <span class="setting-ico"><svg class="ico"><use href="#i-pin"></use></svg></span>
                   <span class="setting-text"><strong>窗口置顶</strong><small>浮窗保持在游戏上方。</small></span>

@@ -699,6 +699,48 @@ function fmt(sec) {
 
 /* -------------------------------------------------------------------- UI */
 
+/* 字幕提到「清怪」时自动暂停。
+ *
+ * 攻略里说「清怪」是要开打了，先把视频停住看完再动手。
+ * 「清完怪」「清完小怪」这类是**打完之后**的描述，不能暂停 ——
+ * 所以要先排掉「清完」再判断「清怪」。
+ * 同一句字幕会反复出现，记住上次触发的那句避免反复暂停。
+ * 暂停后不自动恢复，用户自己点播放。 */
+let lastPauseText = '';
+let lastPauseAt = 0;
+let pauseTimer = null;
+function pauseOnClearNotice(text) {
+  const s = state.boot && state.boot.settings;
+  const line = String(text || '');
+  /* 诊断：把每一步的判断结果写进 startup.log，方便定位「识别到了却不暂停」。
+   * 只有开关打开时才记，避免平时刷日志。 */
+  const trace = (stage, extra) => {
+    try { window.api.diag('pauseClear', { stage, text: line.slice(0, 30), ...(extra || {}) }); } catch {}
+  };
+  if (!s || !s.subtitlePauseOnClear) return;
+  if (/清完|清好了|清掉了|打完|打完怪|刷完|收完/.test(line)) { trace('skip-past'); return; }
+  if (/清了/.test(line) && !/(先|要|去).{0,4}清了/.test(line)) { trace('skip-le'); return; }
+  if (!/清怪|清一下|清一波|清波|清小怪|清下|清个|把怪清|先把怪/.test(line)) return;
+  /* 同一句不重复触发 —— 但要加时间窗口：
+   * 字幕轮询会连续推送同一句（正常），可用户反复拖进度条回到同一段时，
+   * 隔了很久还判定成「重复」就再也不触发了。超过 3 秒算新的一次。 */
+  if (line === lastPauseText && Date.now() - lastPauseAt < 3000) { trace('skip-repeat'); return; }
+  lastPauseText = line;
+  lastPauseAt = Date.now();
+  /* 字幕是整句一起出现的，没有「说到某个字」的概念 ——
+   * 留几秒读完这句再暂停，否则还没看清就被停住了。 */
+  const delay = Number(s.subtitlePauseDelay);
+  const wait = (Number.isFinite(delay) ? Math.max(0, Math.min(10, delay)) : 2.5) * 1000;
+  trace('fire', { wait, hasWv: !!wv, guestReady: !!state.guestReady, queue: (state.queue || []).length });
+  const fire = () => {
+    sendPlayer({ cmd: 'pause' });
+    toast('字幕提到「清怪」，已暂停', 2600);
+  };
+  if (wait <= 0) { fire(); return; }
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(fire, wait);
+}
+
 function wireUi() {
   const loadInput = () => loadVideo($('urlInput').value, undefined, true);
   $('btnLoad').addEventListener('click', loadInput);
@@ -727,6 +769,12 @@ function wireUi() {
   $('btnSpeed').addEventListener('click', () => window.api.action('cycle-speed'));
   window.api.onNotice((text) => {
     if (text) toast(text);
+  });
+  /* 主进程把当前这句字幕推过来。这里只做「清怪自动暂停」一件事，
+   * 方位判断和雷达交给主进程那一侧处理。 */
+  window.api.onCompassText((p) => {
+    if (!p || !p.text) return;
+    pauseOnClearNotice(p.text);
   });
   window.api.onPlaybackState((next) => {
     if (!next) return;
