@@ -2746,7 +2746,7 @@ function registerIpc() {
     }
     // 字幕样式与开关：改了就下发
     const subKeys = ['subtitleUseApi', 'subtitleHideNative', 'subtitleMergeOverlap',
-      'subtitleHideOnPause', 'subtitleAutoOpen'];
+      'subtitleHideOnPause', 'subtitleAutoOpen', 'subtitlePauseOnClear'];
     let subChanged = false;
     for (const key of subKeys) {
       if (typeof patch[key] === 'boolean') { settings[key] = patch[key]; subChanged = true; }
