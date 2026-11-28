@@ -702,22 +702,43 @@ function fmt(sec) {
 /* 字幕提到「清怪」时自动暂停。
  *
  * 攻略里说「清怪」是要开打了，先把视频停住看完再动手。
- * 「清完怪」「清完小怪」是打完之后才说的，不能暂停 ——
- * 所以先排掉含「清完」的，再判断「清怪」。
- * 同一句字幕会反复推送，记住上次触发的那句避免反复暂停。
+ * 「清完怪」「清完小怪」这类是**打完之后**的描述，不能暂停 ——
+ * 所以要先排掉「清完」再判断「清怪」。
+ * 同一句字幕会反复出现，记住上次触发的那句避免反复暂停。
  * 暂停后不自动恢复，用户自己点播放。 */
 let lastPauseText = '';
+let lastPauseAt = 0;
+let pauseTimer = null;
 function pauseOnClearNotice(text) {
   const s = state.boot && state.boot.settings;
-  if (!s || !s.subtitlePauseOnClear) return;
   const line = String(text || '');
-  if (/清完/.test(line)) return;
-  if (!/清怪/.test(line)) return;
-  if (line === lastPauseText) return;
-  if (!state.video || !state.video.playing) return;
+  /* 诊断：把每一步的判断结果写进 startup.log，方便定位「识别到了却不暂停」。
+   * 只有开关打开时才记，避免平时刷日志。 */
+  const trace = (stage, extra) => {
+    try { window.api.diag('pauseClear', { stage, text: line.slice(0, 30), ...(extra || {}) }); } catch {}
+  };
+  if (!s || !s.subtitlePauseOnClear) return;
+  if (/清完|清好了|清掉了|打完|打完怪|刷完|收完/.test(line)) { trace('skip-past'); return; }
+  if (/清了/.test(line) && !/(先|要|去).{0,4}清了/.test(line)) { trace('skip-le'); return; }
+  if (!/清怪|清一下|清一波|清波|清小怪|清下|清个|把怪清|先把怪/.test(line)) return;
+  /* 同一句不重复触发 —— 但要加时间窗口：
+   * 字幕轮询会连续推送同一句（正常），可用户反复拖进度条回到同一段时，
+   * 隔了很久还判定成「重复」就再也不触发了。超过 3 秒算新的一次。 */
+  if (line === lastPauseText && Date.now() - lastPauseAt < 3000) { trace('skip-repeat'); return; }
   lastPauseText = line;
-  sendPlayer({ cmd: 'pause' });
-  toast('字幕提到「清怪」，已暂停', 2600);
+  lastPauseAt = Date.now();
+  /* 字幕是整句一起出现的，没有「说到某个字」的概念 ——
+   * 留几秒读完这句再暂停，否则还没看清就被停住了。 */
+  const delay = Number(s.subtitlePauseDelay);
+  const wait = (Number.isFinite(delay) ? Math.max(0, Math.min(10, delay)) : 2.5) * 1000;
+  trace('fire', { wait, hasWv: !!wv, guestReady: !!state.guestReady, queue: (state.queue || []).length });
+  const fire = () => {
+    sendPlayer({ cmd: 'pause' });
+    toast('字幕提到「清怪」，已暂停', 2600);
+  };
+  if (wait <= 0) { fire(); return; }
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(fire, wait);
 }
 
 function wireUi() {

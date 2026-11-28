@@ -443,6 +443,10 @@ function fillSettings(settings) {
   $('setSubtitle').checked = !!settings.enableSubtitleSprite;
   $('setSubHideOnPause').checked = settings.subtitleHideOnPause === true;
   $('setSubPauseOnClear').checked = settings.subtitlePauseOnClear === true;
+  const pauseDelay = Number(settings.subtitlePauseDelay);
+  const delay = Number.isFinite(pauseDelay) ? Math.max(0, Math.min(10, pauseDelay)) : 2.5;
+  $('setSubPauseDelay').value = String(delay);
+  $('subPauseDelayVal').textContent = delay === 0 ? '立即' : delay + ' s';
   $('setTurnReminder').checked = !!settings.enableTurnReminder;
   $('setOverlayRadar').checked = settings.overlayRadar === true;
   $('setAlertEnabled').checked = !!settings.alertEnabled;
@@ -498,6 +502,12 @@ function wireSettings() {
     const on = event.target.checked;
     state.boot.settings.subtitlePauseOnClear = on;
     window.api.save({ subtitlePauseOnClear: on });
+  });
+  $('setSubPauseDelay').addEventListener('input', (event) => {
+    const v = Number(event.target.value);
+    $('subPauseDelayVal').textContent = v === 0 ? '立即' : v + ' s';
+    state.boot.settings.subtitlePauseDelay = v;
+    window.api.save({ subtitlePauseDelay: v });
   });
   $('setTurnReminder').addEventListener('change', (event) => {
     const on = event.target.checked;

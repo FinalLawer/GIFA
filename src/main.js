@@ -458,6 +458,9 @@ const DEFAULT_SETTINGS = {
    * 攻略里说「清怪」是要开打了，先把视频停住看完再动手。
    * 「清完怪」这类是打完之后的描述，不触发。 */
   subtitlePauseOnClear: false,
+  /* 字幕出现后等几秒再暂停。字幕是整句一起出现的，没有「说到哪个字」的概念，
+   * 所以要留出读完这一句的时间。0 = 立即暂停。 */
+  subtitlePauseDelay: 2.5,
   // 字幕位置：bottom / top
   subtitlePos: 'bottom',
   /* 转向提醒：字幕里出现「左转/右转/往东」等词时，
@@ -2756,6 +2759,11 @@ function registerIpc() {
       subChanged = true;
     }
     if (subChanged) pushSubtitleConfig();
+    // 清怪暂停的延迟秒数（0~10，0 = 立即）
+    if (patch.subtitlePauseDelay !== undefined) {
+      const v = Number(patch.subtitlePauseDelay);
+      if (Number.isFinite(v)) settings.subtitlePauseDelay = Math.max(0, Math.min(10, v));
+    }
     /* 转向提醒：与字幕共用窗口，任一个开着就要有窗口 */
     if (typeof patch.enableTurnReminder === 'boolean') {
       settings.enableTurnReminder = patch.enableTurnReminder;
